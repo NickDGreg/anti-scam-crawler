@@ -15,13 +15,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Automate registration and deposit extraction flows"
     )
-    parser.add_argument("--run-id", dest="run_id", help="Optional run identifier")
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--run-id", dest="run_id", help="Optional run identifier")
+    common.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+
     register_parser = subparsers.add_parser(
-        "register", help="Submit a registration form"
+        "register", help="Submit a registration form", parents=[common]
     )
     _add_common_arguments(register_parser)
     register_parser.add_argument(
@@ -29,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     extract_parser = subparsers.add_parser(
-        "extract", help="Log in and extract deposit info"
+        "extract", help="Log in and extract deposit info", parents=[common]
     )
     _add_common_arguments(extract_parser)
     extract_parser.add_argument(

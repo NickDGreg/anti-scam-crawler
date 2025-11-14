@@ -25,6 +25,8 @@ from .browser import BrowserConfig, BrowserSession
 from .io_utils import RunPaths, relative_artifact_path, sanitize_filename, save_text
 from .parsing import Indicator, extract_indicators
 
+MODULE_LOGGER = logging.getLogger(__name__)
+
 EXPLORATION_KEYWORDS = (
     "deposit",
     "wallet",
@@ -65,19 +67,32 @@ def run_extraction(inputs: ExtractInputs) -> Dict[str, object]:
     indicator_records: List[Indicator] = []
 
     try:
+        logger.debug("Starting extract run for %s as %s", inputs.url, inputs.email)
         with BrowserSession(BrowserConfig()) as browser:
             page = browser.goto(inputs.url, wait_until="networkidle")
             final_url = page.url
+            logger.debug("Loaded entry page %s", final_url)
             landing_shot = browser.screenshot(run_paths.build_path("00_landing.png"))
             artifacts.append(relative_artifact_path(landing_shot))
 
+            logger.debug("Looking for login form on %s", page.url)
             form = find_form(
-                page, {"email": EMAIL_SELECTORS, "secret": SECRET_SELECTORS}
+                page,
+                {"email": EMAIL_SELECTORS, "secret": SECRET_SELECTORS},
+                logger=logger,
             )
             if not form:
-                click_keywords(page, LOGIN_KEYWORDS + KEYWORD_CLICKS, max_clicks=4)
+                logger.debug("Login form not found, attempting keyword navigation")
+                click_keywords(
+                    page,
+                    LOGIN_KEYWORDS + KEYWORD_CLICKS,
+                    max_clicks=4,
+                    logger=logger,
+                )
                 form = find_form(
-                    page, {"email": EMAIL_SELECTORS, "secret": SECRET_SELECTORS}
+                    page,
+                    {"email": EMAIL_SELECTORS, "secret": SECRET_SELECTORS},
+                    logger=logger,
                 )
 
             if not form:
@@ -85,10 +100,17 @@ def run_extraction(inputs: ExtractInputs) -> Dict[str, object]:
                 notes.append(
                     "Could not locate a login form with email + secret fields."
                 )
+                logger.warning("Login form still missing after heuristics")
             else:
-                fill_form_fields(form, {"email": inputs.email, "secret": inputs.secret})
+                logger.debug("Login form located, populating credentials")
+                fill_form_fields(
+                    form,
+                    {"email": inputs.email, "secret": inputs.secret},
+                    logger=logger,
+                )
                 pre_submit_url = page.url
-                submit_form(form)
+                logger.debug("Submitting login form")
+                submit_form(form, logger=logger)
                 try:
                     page.wait_for_load_state("networkidle", timeout=10000)
                 except PlaywrightTimeoutError:
@@ -96,6 +118,7 @@ def run_extraction(inputs: ExtractInputs) -> Dict[str, object]:
                         "Login submission did not trigger navigation within timeout"
                     )
                 final_url = page.url
+                logger.debug("Post-login URL candidate: %s", final_url)
 
                 post_login_html = page.content()
                 html_path = save_text(
@@ -107,14 +130,18 @@ def run_extraction(inputs: ExtractInputs) -> Dict[str, object]:
                 )
                 artifacts.append(relative_artifact_path(screenshot_path))
 
-                error_text = detect_error_banner(page)
-                logged_in = infer_login_success(page, pre_submit_url, error_text)
+                error_text = detect_error_banner(page, logger=logger)
+                logged_in = infer_login_success(
+                    page, pre_submit_url, error_text, logger=logger
+                )
                 if error_text:
                     notes.append(error_text)
                 if not logged_in:
                     status = "login_failed"
+                    logger.warning("Login appears to have failed")
                 else:
                     status = "complete"
+                    logger.debug("Login succeeded; starting exploration")
                     indicator_records.extend(
                         _tag_indicators(post_login_html, page.url, html_path)
                     )
@@ -141,15 +168,25 @@ def run_extraction(inputs: ExtractInputs) -> Dict[str, object]:
     return result
 
 
-def infer_login_success(page, previous_url: str, error_text: str | None) -> bool:
+def infer_login_success(
+    page,
+    previous_url: str,
+    error_text: str | None,
+    logger: logging.Logger | None = None,
+) -> bool:
+    log = logger or MODULE_LOGGER
     if error_text:
+        log.info("Error banner present after login attempt: %s", error_text)
         return False
     if page.url != previous_url:
+        log.debug("URL changed after login submit (%s -> %s)", previous_url, page.url)
         return True
     for keyword in LOGGED_IN_HINTS:
         locator = page.get_by_text(re.compile(keyword, re.IGNORECASE))
         if locator.count() > 0:
+            log.debug("Detected logged-in hint '%s' on page", keyword)
             return True
+    log.debug("No sign of logged-in state detected")
     return False
 
 
@@ -166,8 +203,10 @@ def explore_interesting_pages(
     for keyword in EXPLORATION_KEYWORDS:
         if steps >= max_steps:
             break
-        clicked = click_by_text(page, keyword)
+        logger.debug("Exploration step %d: looking for '%s'", steps + 1, keyword)
+        clicked = click_by_text(page, keyword, logger=logger)
         if not clicked:
+            logger.debug("Keyword '%s' not found on current page", keyword)
             continue
         steps += 1
         try:
@@ -183,7 +222,9 @@ def explore_interesting_pages(
         screenshot_path = browser.screenshot(run_paths.build_path(f"{label}.png"))
         artifacts.append(relative_artifact_path(screenshot_path))
         indicators.extend(_tag_indicators(html, page.url, html_path))
-    if not indicators:
+    if indicators:
+        logger.info("Detected %d indicators during exploration", len(indicators))
+    else:
         logger.info("No deposit indicators detected during exploration")
     return artifacts, indicators
 
