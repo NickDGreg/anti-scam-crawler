@@ -12,13 +12,18 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from .automation import KEYWORD_CLICKS, click_keywords, submit_form_element
 from .browser import BrowserConfig, BrowserSession
 from .field_classifier import FieldClassification
+from .field_errors import FieldError, extract_field_errors, interpret_field_error
 from .form_detection import find_best_registration_form
 from .form_filling import FieldFillResult, apply_assignments
 from .form_models import FormDescriptor
-from .io_utils import RunPaths, relative_artifact_path
+from .io_utils import RunPaths, relative_artifact_path, write_json
+from .network_capture import NetworkCapture
+from .registration_evaluator import evaluate_registration_result
 from .value_assignment import (
     FieldDecision,
     RegistrationContext,
+    ValuePlan,
+    adjust_value_for_retry,
     assign_registration_values,
 )
 
@@ -34,6 +39,20 @@ class RegisterInputs:
     logger: logging.Logger
 
 
+@dataclass(slots=True)
+class AttemptResult:
+    status: str
+    filled_fields: List[Dict[str, str]]
+    field_errors: List[FieldError]
+    validation_message: Optional[str]
+    success_message: Optional[str]
+    assignment_values: Dict[str, str]
+    artifacts: List[str]
+    field_errors_path: Optional[str]
+    notes: List[str]
+    final_url: str
+
+
 def run_registration(inputs: RegisterInputs) -> Dict[str, object]:
     logger = inputs.logger
     run_paths = inputs.run_paths
@@ -43,6 +62,14 @@ def run_registration(inputs: RegisterInputs) -> Dict[str, object]:
     final_url = inputs.url
     filled_field_report: List[Dict[str, str]] = []
     resolved_password = inputs.password or DEFAULT_PASSWORD
+    validation_message: Optional[str] = None
+    success_message: Optional[str] = None
+    network_artifacts: List[str] = []
+    field_error_summary: List[Dict[str, str]] = []
+    last_attempt_result: Optional[AttemptResult] = None
+
+    attempts_taken = 0
+    adjustments_log: List[Dict[str, str]] = []
 
     try:
         logger.debug("Starting registration against %s as %s", inputs.url, inputs.email)
@@ -53,61 +80,59 @@ def run_registration(inputs: RegisterInputs) -> Dict[str, object]:
             landing_shot = browser.screenshot(run_paths.build_path("00_landing.png"))
             artifacts.append(relative_artifact_path(landing_shot))
 
-            form_descriptor, classifications = _discover_registration_form(page, logger)
-            if not form_descriptor:
-                status = "no_form_found"
-                notes.append(
-                    "Could not identify a registration form after heuristic navigation."
-                )
-                logger.warning("Registration form still missing after heuristics")
-            else:
-                _log_field_classifications(classifications, logger)
+            with NetworkCapture(page) as network_logger:
                 context = RegistrationContext(
                     email=inputs.email,
                     password=resolved_password,
                     run_id=run_paths.run_id,
                 )
-                assignments, decisions = assign_registration_values(
-                    classifications, context
-                )
-                _log_decisions(decisions, logger)
+                adjustments: Dict[str, ValuePlan] = {}
 
-                if not assignments:
-                    status = "no_fillable_fields"
-                    notes.append("No suitable fields could be auto-filled.")
-                    logger.warning("No assignments generated for registration form")
-                else:
-                    fill_results = apply_assignments(assignments, logger)
-                    filled_field_report = _serialize_fill_results(fill_results)
-
-                    filled_html = browser.save_html(
-                        run_paths.build_path("01_filled.html")
+                for attempt_no in (1, 2):
+                    result = _perform_attempt(
+                        page=page,
+                        run_paths=run_paths,
+                        attempt_no=attempt_no,
+                        logger=logger,
+                        context=context,
+                        adjustments=adjustments if attempt_no == 2 else {},
                     )
-                    artifacts.append(relative_artifact_path(filled_html))
-                    filled_shot = browser.screenshot(
-                        run_paths.build_path("01_filled.png")
-                    )
-                    artifacts.append(relative_artifact_path(filled_shot))
+                    attempts_taken = attempt_no
+                    artifacts.extend(result.artifacts)
+                    notes.extend(result.notes)
+                    filled_field_report = result.filled_fields or filled_field_report
+                    validation_message = result.validation_message or validation_message
+                    success_message = result.success_message or success_message
+                    status = result.status
+                    final_url = result.final_url or final_url
+                    last_attempt_result = result
 
-                    logger.debug("Submitting registration form element")
-                    submit_form_element(form_descriptor.element, logger=logger)
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=8000)
-                    except PlaywrightTimeoutError:
-                        logger.debug(
-                            "Registration submission did not trigger navigation within timeout"
+                    if status == "registered":
+                        break
+
+                    if attempt_no == 1 and status == "validation_failed":
+                        adjustments, adj_log = _prepare_adjustments(
+                            result.field_errors, result.assignment_values, logger
                         )
-                    final_url = page.url
-                    logger.debug("Post-submission URL: %s", final_url)
-                    status = "submitted"
-                    notes.append(
-                        f"Registration form submitted with {len(filled_field_report)} filled fields."
+                        if adjustments:
+                            adjustments_log.extend(adj_log)
+                            logger.info(
+                                "Retrying registration with %d adjustments",
+                                len(adjustments),
+                            )
+                            continue
+                        break
+                    else:
+                        break
+
+                if last_attempt_result:
+                    field_error_summary = _serialize_field_errors(
+                        last_attempt_result.field_errors
                     )
 
-            html_path = browser.save_html(run_paths.build_path("final.html"))
-            artifacts.append(relative_artifact_path(html_path))
-            screenshot_path = browser.screenshot(run_paths.build_path("02_final.png"))
-            artifacts.append(relative_artifact_path(screenshot_path))
+                network_path = network_logger.dump(run_paths.build_path("network.json"))
+                if network_path:
+                    network_artifacts.append(relative_artifact_path(network_path))
 
     except Exception as exc:  # noqa: BLE001
         logger.exception("Registration command failed: %s", exc)
@@ -122,6 +147,12 @@ def run_registration(inputs: RegisterInputs) -> Dict[str, object]:
         "notes": " | ".join(notes) if notes else "",
         "artifacts": artifacts,
         "filled_fields": filled_field_report,
+        "validation_message": validation_message,
+        "success_message": success_message,
+        "network_artifacts": network_artifacts,
+        "attempts": attempts_taken or 0,
+        "field_errors": field_error_summary,
+        "adjustments_made": adjustments_log,
     }
     return result
 
@@ -175,14 +206,196 @@ def _log_decisions(decisions: List[FieldDecision], logger: logging.Logger) -> No
 def _serialize_fill_results(results: List[FieldFillResult]) -> List[Dict[str, str]]:
     report: List[Dict[str, str]] = []
     for result in results:
-        report.append(
+        entry = {
+            "semantic": result.semantic.value,
+            "field_name": result.field_name,
+            "strategy": result.strategy,
+            "status": "filled" if result.success else "error",
+            "required": str(result.required),
+            "preview": result.preview,
+        }
+        if result.error:
+            entry["error"] = result.error
+        report.append(entry)
+    return report
+
+
+def _perform_attempt(
+    page: Page,
+    run_paths: RunPaths,
+    attempt_no: int,
+    logger: logging.Logger,
+    context: RegistrationContext,
+    adjustments: Dict[str, "ValuePlan"],
+) -> AttemptResult:
+    artifacts: List[str] = []
+    notes: List[str] = []
+    filled_fields: List[Dict[str, str]] = []
+    assignment_values: Dict[str, str] = {}
+    field_errors: List[FieldError] = []
+    validation_message: Optional[str] = None
+    success_message: Optional[str] = None
+    field_errors_path: Optional[str] = None
+
+    form_descriptor, classifications = _discover_registration_form(page, logger)
+    if not form_descriptor:
+        notes.append("Registration form could not be located during attempt.")
+        return AttemptResult(
+            status="validation_failed",
+            filled_fields=filled_fields,
+            field_errors=field_errors,
+            validation_message=None,
+            success_message=None,
+            assignment_values=assignment_values,
+            artifacts=artifacts,
+            field_errors_path=None,
+            notes=notes,
+            final_url=page.url,
+        )
+
+    _log_field_classifications(classifications, logger)
+    assignments, decisions = assign_registration_values(classifications, context)
+    _log_decisions(decisions, logger)
+
+    if not assignments:
+        notes.append("No fields were eligible for auto-fill.")
+        return AttemptResult(
+            status="validation_failed",
+            filled_fields=filled_fields,
+            field_errors=field_errors,
+            validation_message=None,
+            success_message=None,
+            assignment_values=assignment_values,
+            artifacts=artifacts,
+            field_errors_path=None,
+            notes=notes,
+            final_url=page.url,
+        )
+
+    if adjustments:
+        for assignment in assignments:
+            field_name = assignment.descriptor.canonical_name()
+            custom_plan = adjustments.get(field_name)
+            if custom_plan:
+                logger.debug(
+                    "Applying retry adjustment to %s (%s)",
+                    field_name,
+                    assignment.semantic.value,
+                )
+                assignment.plan = custom_plan
+
+    for assignment in assignments:
+        field_name = assignment.descriptor.canonical_name()
+        assignment_values[field_name] = str(assignment.plan.value)
+
+    fill_results = apply_assignments(assignments, logger)
+    filled_fields = _serialize_fill_results(fill_results)
+
+    filled_html_path = run_paths.build_path(f"01_attempt{attempt_no}_filled.html")
+    filled_html_path.write_text(page.content(), encoding="utf-8")
+    artifacts.append(relative_artifact_path(filled_html_path))
+    filled_shot_path = run_paths.build_path(f"01_attempt{attempt_no}_filled.png")
+    page.screenshot(path=str(filled_shot_path), full_page=True)
+    artifacts.append(relative_artifact_path(filled_shot_path))
+
+    logger.debug("Submitting registration form element (attempt %s)", attempt_no)
+    pre_submit_url = page.url
+    submit_form_element(form_descriptor.element, logger=logger)
+    try:
+        page.wait_for_load_state("networkidle", timeout=8000)
+    except PlaywrightTimeoutError as exc:
+        logger.debug("Submission wait timed out: %s", exc)
+    final_url = page.url
+    logger.debug("Attempt %s post-submit URL: %s", attempt_no, final_url)
+
+    outcome = evaluate_registration_result(
+        page, previous_url=pre_submit_url, logger=logger
+    )
+    status = outcome.status
+    validation_message = outcome.validation_message
+    success_message = outcome.success_message
+    if validation_message:
+        notes.append(validation_message)
+    if success_message:
+        notes.append(success_message)
+    if not validation_message and not success_message:
+        notes.append(f"Attempt {attempt_no} submitted {len(filled_fields)} fields.")
+
+    field_errors = extract_field_errors(page, classifications, logger=logger)
+    errors_payload = _serialize_field_errors(field_errors)
+    errors_path = run_paths.build_path(f"field_errors_attempt{attempt_no}.json")
+    write_json(errors_path, errors_payload)
+    field_errors_path = relative_artifact_path(errors_path)
+    artifacts.append(field_errors_path)
+
+    post_html_path = run_paths.build_path(f"02_attempt{attempt_no}_post_submit.html")
+    post_html_path.write_text(page.content(), encoding="utf-8")
+    artifacts.append(relative_artifact_path(post_html_path))
+    post_shot_path = run_paths.build_path(f"02_attempt{attempt_no}_post_submit.png")
+    page.screenshot(path=str(post_shot_path), full_page=True)
+    artifacts.append(relative_artifact_path(post_shot_path))
+
+    return AttemptResult(
+        status=status,
+        filled_fields=filled_fields,
+        field_errors=field_errors,
+        validation_message=validation_message,
+        success_message=success_message,
+        assignment_values=assignment_values,
+        artifacts=artifacts,
+        field_errors_path=field_errors_path,
+        notes=notes,
+        final_url=final_url,
+    )
+
+
+def _prepare_adjustments(
+    field_errors: List[FieldError],
+    assignment_values: Dict[str, str],
+    logger: logging.Logger,
+) -> Tuple[Dict[str, "ValuePlan"], List[Dict[str, str]]]:
+    adjustments: Dict[str, ValuePlan] = {}
+    logs: List[Dict[str, str]] = []
+    for field_error in field_errors:
+        interpretation = interpret_field_error(field_error)
+        if not interpretation:
+            continue
+        previous_value = assignment_values.get(field_error.field_name)
+        if previous_value is None:
+            continue
+        plan = adjust_value_for_retry(
+            field_error.semantic, previous_value, interpretation.hints
+        )
+        if not plan:
+            continue
+        adjustments[field_error.field_name] = plan
+        preview = str(plan.value)
+        if len(preview) > 18:
+            preview = preview[:8] + "…"
+        logs.append(
             {
-                "semantic": result.semantic.value,
-                "field_name": result.field_name,
-                "strategy": result.strategy,
-                "status": "filled" if result.success else "error",
-                "required": str(result.required),
-                "preview": result.preview,
+                "field_name": field_error.field_name,
+                "semantic": field_error.semantic.value,
+                "hints": str(interpretation.hints),
+                "strategy": plan.strategy,
+                "preview": preview,
             }
         )
-    return report
+        logger.debug(
+            "Prepared adjustment for %s (%s): %s",
+            field_error.field_name,
+            field_error.semantic.value,
+            interpretation.hints,
+        )
+    return adjustments, logs
+
+
+def _serialize_field_errors(errors: List[FieldError]) -> List[Dict[str, str]]:
+    return [
+        {
+            "field_name": err.field_name,
+            "semantic": err.semantic.value,
+            "error_text": err.error_text,
+        }
+        for err in errors
+    ]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 from .field_classifier import FieldClassification, FieldSemantic
 from .form_models import FieldDescriptor, OptionMetadata
@@ -16,6 +16,7 @@ DEFAULT_PHONE = "+447911123456"
 DEFAULT_COUNTRY = "United Kingdom"
 DEFAULT_COUNTRY_FALLBACK = "United States"
 DEFAULT_CURRENCY = "USD"
+PREFERRED_CURRENCIES = ["usd", "eur", "gbp"]
 GENERIC_PLACEHOLDER = "autofilled"
 
 SEMANTIC_LIMITS = {
@@ -186,16 +187,15 @@ def _plan_value_for_semantic(
         # fallback to text input
         return ValuePlan(value=DEFAULT_COUNTRY, strategy="default_country_text")
     if semantic == FieldSemantic.CURRENCY:
-        option = _select_option(
-            descriptor.options, [DEFAULT_CURRENCY, DEFAULT_CURRENCY.lower()]
-        )
-        if option:
-            return ValuePlan(
-                value=option.label,
-                strategy="preferred_currency",
-                select_option_value=option.value,
-                select_option_label=option.label,
-            )
+        if descriptor.tag == "select" and descriptor.options:
+            option, strategy = _select_currency_option(descriptor.options)
+            if option:
+                return ValuePlan(
+                    value=option.label or option.value,
+                    strategy=strategy,
+                    select_option_value=option.value or None,
+                    select_option_label=option.label or None,
+                )
         return ValuePlan(value=DEFAULT_CURRENCY, strategy="default_currency_text")
     if semantic == FieldSemantic.REFERRAL:
         if descriptor.required:
@@ -225,23 +225,91 @@ def _derive_username(email: str, run_id: str) -> str:
 def _select_option(
     options: Sequence[OptionMetadata], preferred: Sequence[str]
 ) -> Optional[OptionMetadata]:
-    if not options:
-        return None
-    lowered = {opt.label.lower(): opt for opt in options if opt.label}
+    valid_options = [opt for opt in options if not _is_placeholder_option(opt)]
+    if not valid_options:
+        valid_options = list(options)
+    lowered = {(opt.label or "").lower(): opt for opt in valid_options if opt.label}
+    values = {(opt.value or "").lower(): opt for opt in valid_options if opt.value}
     for choice in preferred:
-        candidate = lowered.get(choice.lower())
+        key = choice.lower()
+        candidate = lowered.get(key) or values.get(key)
         if candidate:
             return candidate
-    # fallback: choose first meaningful option
-    for opt in options:
-        if opt.value:
+    for opt in valid_options:
+        if opt.value or opt.label:
             return opt
-    return options[0]
+    return valid_options[0] if valid_options else None
+
+
+def _select_currency_option(
+    options: Sequence[OptionMetadata],
+) -> Tuple[Optional[OptionMetadata], str]:
+    valid_options = [opt for opt in options if not _is_placeholder_option(opt)]
+    if not valid_options:
+        valid_options = list(options)
+    for preferred in PREFERRED_CURRENCIES:
+        for opt in valid_options:
+            label = (opt.label or "").lower()
+            value = (opt.value or "").lower()
+            if preferred in label or preferred in value:
+                return opt, f"currency_preferred_{preferred}"
+    if valid_options:
+        return valid_options[0], "currency_first_valid"
+    return None, "currency_no_options"
+
+
+def _is_placeholder_option(option: OptionMetadata) -> bool:
+    label = (option.label or "").strip().lower()
+    value = (option.value or "").strip().lower()
+    placeholders = ("select", "choose", "--", "please", "option")
+    if not label and not value:
+        return True
+    if label in {"", "-", "--"} or value in {"", "-", "--"}:
+        return True
+    for token in placeholders:
+        if token in label or token in value:
+            return True
+    return False
+
+
+def adjust_value_for_retry(
+    semantic: FieldSemantic,
+    previous_value: str | bool | None,
+    hints: Dict[str, Union[int, bool]],
+) -> Optional[ValuePlan]:
+    if semantic != FieldSemantic.PHONE:
+        return None
+    base_value = str(previous_value or "")
+    digits = re.sub(r"\D", "", base_value)
+    if hints.get("numeric_only"):
+        if digits:
+            base_value = digits
+        else:
+            base_value = _generate_numeric_string(10)
+    if "required_digits" in hints:
+        try:
+            required = int(hints["required_digits"])
+        except (TypeError, ValueError):
+            required = 0
+        if required > 0:
+            base_value = _generate_numeric_string(required)
+    return ValuePlan(value=base_value, strategy="retry_adjustment_phone")
+
+
+def _generate_numeric_string(length: int) -> str:
+    pattern = "1234567890"
+    if length <= len(pattern):
+        return pattern[:length]
+    repeats = (length // len(pattern)) + 1
+    value = (pattern * repeats)[:length]
+    return value
 
 
 __all__ = [
     "RegistrationContext",
+    "ValuePlan",
     "FieldAssignment",
     "FieldDecision",
     "assign_registration_values",
+    "adjust_value_for_retry",
 ]
