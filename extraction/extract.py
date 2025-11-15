@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from .automation import (
@@ -28,23 +29,19 @@ from .parsing import Indicator, extract_indicators
 
 MODULE_LOGGER = logging.getLogger(__name__)
 
-EXPLORATION_KEYWORDS = (
+FUNDING_KEYWORDS = (
     "deposit",
     "wallet",
     "cashier",
-    "bank",
-    "iban",
-    "transfer",
-    "crypto",
-    "btc",
-    "eth",
-    "usdt",
-    "wallet",
-    "pay",
-    "top up",
     "fund",
+    "add funds",
+    "top up",
+    "payment",
+    "bank transfer",
+    "finance",
+    "transfer",
 )
-LOGIN_KEYWORDS = ("login", "log in", "signin", "sign in", "client area")
+MENU_KEYWORDS = ("menu", "sidebar", "navigation", "more")
 LOGGED_IN_HINTS = ("logout", "log out", "dashboard", "my account", "profile", "cabinet")
 DEPOSIT_METHOD_KEYWORDS = (
     "bitcoin",
@@ -63,6 +60,17 @@ DEPOSIT_METHOD_KEYWORDS = (
     "mastercard",
 )
 REVEAL_KEYWORDS = ("show", "view", "display", "copy", "reveal", "get address")
+DEPOSIT_CONTEXT_HINTS = (
+    "deposit",
+    "wallet",
+    "cashier",
+    "fund",
+    "add funds",
+    "payment",
+    "bank transfer",
+    "finance",
+    "top up",
+)
 
 
 @dataclass(slots=True)
@@ -133,21 +141,11 @@ def run_extraction(inputs: ExtractInputs) -> Dict[str, object]:
                 final_url = page.url
                 logger.debug("Post-login URL candidate: %s", final_url)
 
-                state_artifacts, state_indicators = capture_page_state(
-                    browser, run_paths, "01_post_login"
-                )
-                artifacts.extend(state_artifacts)
-                indicator_records.extend(state_indicators)
-                reveal_artifacts, reveal_indicators = reveal_hidden_sections(
+                scan_artifacts, scan_indicators = scan_current_view(
                     browser, run_paths, "01_post_login", logger
                 )
-                artifacts.extend(reveal_artifacts)
-                indicator_records.extend(reveal_indicators)
-                method_artifacts, method_indicators = click_deposit_methods(
-                    browser, run_paths, "01_post_login", logger
-                )
-                artifacts.extend(method_artifacts)
-                indicator_records.extend(method_indicators)
+                artifacts.extend(scan_artifacts)
+                indicator_records.extend(scan_indicators)
 
                 error_text = detect_error_banner(page, logger=logger)
                 logged_in = infer_login_success(
@@ -216,35 +214,43 @@ def explore_interesting_pages(
     indicators: List[Indicator] = []
     page = browser.page
     steps = 0
-    for keyword in EXPLORATION_KEYWORDS:
-        if steps >= max_steps:
-            break
-        logger.debug("Exploration step %d: looking for '%s'", steps + 1, keyword)
-        clicked = click_by_text(page, keyword, logger=logger)
-        if not clicked:
-            logger.debug("Keyword '%s' not found on current page", keyword)
-            continue
-        steps += 1
-        try:
-            page.wait_for_load_state("networkidle", timeout=7000)
-        except PlaywrightTimeoutError:
-            logger.debug(
-                "Navigation after clicking '%s' did not complete in time", keyword
-            )
-        label = f"step_{steps:02d}_{sanitize_filename(keyword)}"
-        view_artifacts, view_indicators = capture_page_state(browser, run_paths, label)
-        artifacts.extend(view_artifacts)
-        indicators.extend(view_indicators)
-        reveal_artifacts, reveal_indicators = reveal_hidden_sections(
+
+    def process_current_view(label: str) -> None:
+        scan_artifacts, scan_indicators = scan_current_view(
             browser, run_paths, label, logger
         )
-        artifacts.extend(reveal_artifacts)
-        indicators.extend(reveal_indicators)
-        method_artifacts, method_indicators = click_deposit_methods(
-            browser, run_paths, label, logger
+        artifacts.extend(scan_artifacts)
+        indicators.extend(scan_indicators)
+
+    def run_keywords(keywords: Tuple[str, ...], prefix: str) -> None:
+        nonlocal steps
+        for keyword in keywords:
+            if steps >= max_steps:
+                break
+            logger.debug("Exploration step %d: looking for '%s'", steps + 1, keyword)
+            clicked = click_by_text(page, keyword, logger=logger)
+            if not clicked:
+                continue
+            steps += 1
+            try:
+                page.wait_for_load_state("networkidle", timeout=7000)
+            except PlaywrightTimeoutError:
+                logger.debug(
+                    "Navigation after clicking '%s' did not complete in time", keyword
+                )
+            label = f"{prefix}_{steps:02d}_{sanitize_filename(keyword)}"
+            process_current_view(label)
+
+    run_keywords(FUNDING_KEYWORDS, "step")
+
+    if steps < max_steps and not is_deposit_context(page):
+        logger.debug(
+            "Deposit context not detected after primary pass; attempting menu fallback"
         )
-        artifacts.extend(method_artifacts)
-        indicators.extend(method_indicators)
+        if click_menu(page, logger=logger):
+            page.wait_for_timeout(800)
+            run_keywords(FUNDING_KEYWORDS, "step")
+
     if indicators:
         logger.info("Detected %d indicators during exploration", len(indicators))
     else:
@@ -337,3 +343,55 @@ def click_deposit_methods(
         artifacts.extend(view_artifacts)
         indicators.extend(view_indicators)
     return artifacts, indicators
+
+
+def scan_current_view(
+    browser: BrowserSession, run_paths: RunPaths, label: str, logger: logging.Logger
+) -> Tuple[List[str], List[Indicator]]:
+    artifacts, indicators = capture_page_state(browser, run_paths, label)
+    reveal_artifacts, reveal_indicators = reveal_hidden_sections(
+        browser, run_paths, label, logger
+    )
+    artifacts.extend(reveal_artifacts)
+    indicators.extend(reveal_indicators)
+    if is_deposit_context(browser.page):
+        method_artifacts, method_indicators = click_deposit_methods(
+            browser, run_paths, label, logger
+        )
+        artifacts.extend(method_artifacts)
+        indicators.extend(method_indicators)
+    return artifacts, indicators
+
+
+def click_menu(page, *, logger: logging.Logger) -> bool:
+    for keyword in MENU_KEYWORDS:
+        logger.debug("Attempting to open navigation via keyword '%s'", keyword)
+        if click_by_text(page, keyword, logger=logger):
+            return True
+    logger.debug("Navigation keywords did not open a menu")
+    return False
+
+
+def is_deposit_context(page) -> bool:
+    url_lower = page.url.lower()
+    if any(hint in url_lower for hint in DEPOSIT_CONTEXT_HINTS):
+        return True
+    try:
+        headings = page.locator("h1, h2, .page-title, [role='heading']")
+        count = min(3, headings.count())
+        for idx in range(count):
+            try:
+                text = headings.nth(idx).inner_text(timeout=500).strip().lower()
+            except PlaywrightError:
+                continue
+            if any(hint in text for hint in DEPOSIT_CONTEXT_HINTS):
+                return True
+    except PlaywrightError:
+        pass
+    try:
+        body_snippet = page.inner_text("body", timeout=800).lower()
+        if any(hint in body_snippet for hint in DEPOSIT_CONTEXT_HINTS):
+            return True
+    except PlaywrightError:
+        return False
+    return False
