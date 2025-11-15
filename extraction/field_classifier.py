@@ -22,6 +22,7 @@ class FieldSemantic(str, Enum):
     PHONE = "phone"
     COUNTRY = "country"
     CURRENCY = "currency"
+    GENDER = "gender"
     REFERRAL = "referral"
     TERMS = "terms_checkbox"
     GENERIC_TEXT = "generic_text"
@@ -57,6 +58,7 @@ CURRENCY_KEYWORDS = ["currency", "account currency", "usd", "eur", "gbp"]
 REFERRAL_KEYWORDS = ["referral", "promo", "code", "coupon", "partner"]
 TERMS_KEYWORDS = ["terms", "conditions", "privacy", "agreement", "policy", "consent"]
 ADDRESS_KEYWORDS = ["address", "street", "city", "zip", "postal"]
+GENDER_KEYWORDS = ["gender", "sex"]
 
 COUNTRY_SAMPLE = {
     "united states",
@@ -178,6 +180,12 @@ def classify_field(field: FieldDescriptor) -> FieldClassification:
     )
 
     _apply_keyword_scores(
+        tokens, GENDER_KEYWORDS, FieldSemantic.GENDER, scores, weight=1.5
+    )
+    if field.tag == "select" and _has_gender_options(field):
+        scores[FieldSemantic.GENDER] += 2.0
+
+    _apply_keyword_scores(
         tokens, REFERRAL_KEYWORDS, FieldSemantic.REFERRAL, scores, weight=0.8
     )
 
@@ -269,6 +277,12 @@ def _looks_like_currency_field(field: FieldDescriptor) -> bool:
         if any(code in field.placeholder.lower() for code in CURRENCY_CODES):
             return True
     return False
+
+
+def _has_gender_options(field: FieldDescriptor) -> bool:
+    labels = {opt.label.lower() for opt in field.options if opt.label}
+    candidates = {"male", "female", "other", "others"}
+    return bool(labels & candidates)
 
 
 __all__ = [

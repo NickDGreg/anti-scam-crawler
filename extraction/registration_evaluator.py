@@ -85,7 +85,7 @@ def _detect_keyword_message(
         lowered = text.lower()
         for keyword in keywords:
             if keyword in lowered:
-                return text.strip()
+                return _clean_snippet(text)
     return None
 
 
@@ -105,7 +105,7 @@ def _detect_success(page: Page, previous_url: str) -> Optional[str]:
         lowered = text.lower()
         for keyword in SUCCESS_KEYWORDS:
             if keyword in lowered:
-                return text.strip()
+                return _clean_snippet(text)
     return None
 
 
@@ -134,6 +134,13 @@ def _safe_inner_text(page: Page, selector: str) -> Optional[str]:
         return text.strip()
     except Exception:  # noqa: BLE001
         return None
+
+
+def _clean_snippet(text: str, limit: int = 280) -> str:
+    snippet = text.strip()
+    if len(snippet) <= limit:
+        return snippet
+    return f"{snippet[:limit]}…"
 
 
 __all__ = ["SubmissionOutcome", "evaluate_registration_result"]

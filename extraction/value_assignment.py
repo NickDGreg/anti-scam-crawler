@@ -17,6 +17,7 @@ DEFAULT_COUNTRY = "United Kingdom"
 DEFAULT_COUNTRY_FALLBACK = "United States"
 DEFAULT_CURRENCY = "USD"
 PREFERRED_CURRENCIES = ["usd", "eur", "gbp"]
+DEFAULT_GENDER = "Male"
 GENERIC_PLACEHOLDER = "autofilled"
 
 SEMANTIC_LIMITS = {
@@ -30,6 +31,7 @@ SEMANTIC_LIMITS = {
     FieldSemantic.PHONE: 1,
     FieldSemantic.COUNTRY: 1,
     FieldSemantic.CURRENCY: 1,
+    FieldSemantic.GENDER: 1,
     FieldSemantic.REFERRAL: 1,
     FieldSemantic.TERMS: 1,
     FieldSemantic.GENERIC_TEXT: 3,
@@ -197,6 +199,19 @@ def _plan_value_for_semantic(
                     select_option_label=option.label or None,
                 )
         return ValuePlan(value=DEFAULT_CURRENCY, strategy="default_currency_text")
+    if semantic == FieldSemantic.GENDER:
+        if descriptor.tag == "select" and descriptor.options:
+            option = _select_option(
+                descriptor.options, ["male", "female", "other", "others"]
+            )
+            if option:
+                return ValuePlan(
+                    value=option.label or option.value,
+                    strategy="preferred_gender_option",
+                    select_option_value=option.value or None,
+                    select_option_label=option.label or None,
+                )
+        return ValuePlan(value=DEFAULT_GENDER, strategy="default_gender_text")
     if semantic == FieldSemantic.REFERRAL:
         if descriptor.required:
             return ValuePlan(value="N/A", strategy="required_referral_placeholder")

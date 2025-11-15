@@ -85,7 +85,9 @@ class NetworkCapture:
     def dump(self, path: Path) -> Optional[Path]:
         if not self.records:
             return None
-        payload = [record.__dict__ for record in self.records]
+        from dataclasses import asdict
+
+        payload = [asdict(record) for record in self.records]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path

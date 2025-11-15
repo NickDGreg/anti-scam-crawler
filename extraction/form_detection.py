@@ -207,6 +207,9 @@ def score_form_candidate(
     if counts.get(FieldSemantic.CURRENCY, 0):
         score += 3
         signals["currency"] = 3
+    if counts.get(FieldSemantic.GENDER, 0):
+        score += 2
+        signals["gender"] = 2
     if len(descriptor.fields) >= 5:
         score += 4
         signals["field_volume"] = 4
