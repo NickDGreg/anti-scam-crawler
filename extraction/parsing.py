@@ -62,14 +62,18 @@ def _collect(pattern: re.Pattern[str], text: str, indicator_type: str, source_ur
 
 
 def extract_indicators(raw_html: str, source_url: str) -> List[Indicator]:
-    text = strip_html(raw_html)
+    plain_text = strip_html(raw_html)
+    raw_text = html.unescape(raw_html)
     found: List[Indicator] = []
-    found.extend(_collect(IBAN_PATTERN, text, "IBAN", source_url))
-    found.extend(_collect(BTC_PATTERN, text, "BTC", source_url))
-    found.extend(_collect(ETH_PATTERN, text, "ETH", source_url))
-    found.extend(_collect(TRON_PATTERN, text, "TRON", source_url))
-    found.extend(_collect(BENEFICIARY_PATTERN, text, "BENEFICIARY_NAME", source_url))
-    found.extend(_collect(BANK_PATTERN, text, "BANK_NAME", source_url))
+    for corpus in (plain_text, raw_text):
+        found.extend(_collect(IBAN_PATTERN, corpus, "IBAN", source_url))
+        found.extend(_collect(BTC_PATTERN, corpus, "BTC", source_url))
+        found.extend(_collect(ETH_PATTERN, corpus, "ETH", source_url))
+        found.extend(_collect(TRON_PATTERN, corpus, "TRON", source_url))
+        found.extend(
+            _collect(BENEFICIARY_PATTERN, corpus, "BENEFICIARY_NAME", source_url)
+        )
+        found.extend(_collect(BANK_PATTERN, corpus, "BANK_NAME", source_url))
     return _deduplicate(found)
 
 

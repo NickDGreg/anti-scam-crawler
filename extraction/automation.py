@@ -146,6 +146,18 @@ KEYWORD_CLICKS = (
 )
 
 
+AUTH_KEYWORDS = (
+    "login",
+    "log in",
+    "signin",
+    "sign in",
+    "client area",
+    "member login",
+    "user login",
+    "log on",
+)
+
+
 def click_keywords(
     page: Page,
     keywords: Iterable[str],

@@ -6,11 +6,12 @@ import logging
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from .automation import (
+    AUTH_KEYWORDS,
     EMAIL_SELECTORS,
     KEYWORD_CLICKS,
     SECRET_SELECTORS,
@@ -43,8 +44,25 @@ EXPLORATION_KEYWORDS = (
     "top up",
     "fund",
 )
-LOGIN_KEYWORDS = ("login", "log in", "sign in", "client area")
+LOGIN_KEYWORDS = ("login", "log in", "signin", "sign in", "client area")
 LOGGED_IN_HINTS = ("logout", "log out", "dashboard", "my account", "profile", "cabinet")
+DEPOSIT_METHOD_KEYWORDS = (
+    "bitcoin",
+    "btc",
+    "ethereum",
+    "eth",
+    "tether",
+    "usdt",
+    "trc20",
+    "erc20",
+    "litecoin",
+    "ltc",
+    "bank transfer",
+    "wire",
+    "visa",
+    "mastercard",
+)
+REVEAL_KEYWORDS = ("show", "view", "display", "copy", "reveal", "get address")
 
 
 @dataclass(slots=True)
@@ -82,13 +100,8 @@ def run_extraction(inputs: ExtractInputs) -> Dict[str, object]:
                 logger=logger,
             )
             if not form:
-                logger.debug("Login form not found, attempting keyword navigation")
-                click_keywords(
-                    page,
-                    LOGIN_KEYWORDS + KEYWORD_CLICKS,
-                    max_clicks=4,
-                    logger=logger,
-                )
+                logger.debug("Login form not found, attempting auth navigation")
+                navigate_to_login(page, logger=logger)
                 form = find_form(
                     page,
                     {"email": EMAIL_SELECTORS, "secret": SECRET_SELECTORS},
@@ -120,15 +133,21 @@ def run_extraction(inputs: ExtractInputs) -> Dict[str, object]:
                 final_url = page.url
                 logger.debug("Post-login URL candidate: %s", final_url)
 
-                post_login_html = page.content()
-                html_path = save_text(
-                    run_paths.build_path("01_post_login.html"), post_login_html
+                state_artifacts, state_indicators = capture_page_state(
+                    browser, run_paths, "01_post_login"
                 )
-                artifacts.append(relative_artifact_path(html_path))
-                screenshot_path = browser.screenshot(
-                    run_paths.build_path("01_post_login.png")
+                artifacts.extend(state_artifacts)
+                indicator_records.extend(state_indicators)
+                reveal_artifacts, reveal_indicators = reveal_hidden_sections(
+                    browser, run_paths, "01_post_login", logger
                 )
-                artifacts.append(relative_artifact_path(screenshot_path))
+                artifacts.extend(reveal_artifacts)
+                indicator_records.extend(reveal_indicators)
+                method_artifacts, method_indicators = click_deposit_methods(
+                    browser, run_paths, "01_post_login", logger
+                )
+                artifacts.extend(method_artifacts)
+                indicator_records.extend(method_indicators)
 
                 error_text = detect_error_banner(page, logger=logger)
                 logged_in = infer_login_success(
@@ -142,9 +161,6 @@ def run_extraction(inputs: ExtractInputs) -> Dict[str, object]:
                 else:
                     status = "complete"
                     logger.debug("Login succeeded; starting exploration")
-                    indicator_records.extend(
-                        _tag_indicators(post_login_html, page.url, html_path)
-                    )
                     more_artifacts, more_indicators = explore_interesting_pages(
                         browser, inputs.max_steps, run_paths, logger
                     )
@@ -216,17 +232,36 @@ def explore_interesting_pages(
                 "Navigation after clicking '%s' did not complete in time", keyword
             )
         label = f"step_{steps:02d}_{sanitize_filename(keyword)}"
-        html = page.content()
-        html_path = save_text(run_paths.build_path(f"{label}.html"), html)
-        artifacts.append(relative_artifact_path(html_path))
-        screenshot_path = browser.screenshot(run_paths.build_path(f"{label}.png"))
-        artifacts.append(relative_artifact_path(screenshot_path))
-        indicators.extend(_tag_indicators(html, page.url, html_path))
+        view_artifacts, view_indicators = capture_page_state(browser, run_paths, label)
+        artifacts.extend(view_artifacts)
+        indicators.extend(view_indicators)
+        reveal_artifacts, reveal_indicators = reveal_hidden_sections(
+            browser, run_paths, label, logger
+        )
+        artifacts.extend(reveal_artifacts)
+        indicators.extend(reveal_indicators)
+        method_artifacts, method_indicators = click_deposit_methods(
+            browser, run_paths, label, logger
+        )
+        artifacts.extend(method_artifacts)
+        indicators.extend(method_indicators)
     if indicators:
         logger.info("Detected %d indicators during exploration", len(indicators))
     else:
         logger.info("No deposit indicators detected during exploration")
     return artifacts, indicators
+
+
+def navigate_to_login(page, *, logger: logging.Logger, max_clicks: int = 5) -> None:
+    clicks = 0
+    for keyword in AUTH_KEYWORDS:
+        if clicks >= max_clicks:
+            break
+        logger.debug("Attempting to reach login via keyword '%s'", keyword)
+        clicked = click_by_text(page, keyword, logger=logger)
+        if clicked:
+            clicks += 1
+            page.wait_for_timeout(800)
 
 
 def _tag_indicators(html: str, url: str, html_path: Path) -> List[Indicator]:
@@ -235,3 +270,70 @@ def _tag_indicators(html: str, url: str, html_path: Path) -> List[Indicator]:
         indicator.artifact = relative_artifact_path(html_path)
         tagged.append(indicator)
     return tagged
+
+
+def capture_page_state(
+    browser: BrowserSession, run_paths: RunPaths, label: str
+) -> Tuple[List[str], List[Indicator]]:
+    page = browser.page
+    html = page.content()
+    html_path = save_text(run_paths.build_path(f"{label}.html"), html)
+    screenshot_path = browser.screenshot(run_paths.build_path(f"{label}.png"))
+    artifacts = [
+        relative_artifact_path(html_path),
+        relative_artifact_path(screenshot_path),
+    ]
+    indicators = _tag_indicators(html, page.url, html_path)
+    return artifacts, indicators
+
+
+def reveal_hidden_sections(
+    browser: BrowserSession,
+    run_paths: RunPaths,
+    base_label: str,
+    logger: logging.Logger,
+    max_clicks: int = 5,
+) -> Tuple[List[str], List[Indicator]]:
+    artifacts: List[str] = []
+    indicators: List[Indicator] = []
+    page = browser.page
+    clicks = 0
+    for keyword in REVEAL_KEYWORDS:
+        if clicks >= max_clicks:
+            break
+        clicked = click_by_text(page, keyword, logger=logger)
+        if not clicked:
+            continue
+        clicks += 1
+        page.wait_for_timeout(600)
+        label = f"{base_label}_reveal_{clicks:02d}_{sanitize_filename(keyword)}"
+        view_artifacts, view_indicators = capture_page_state(browser, run_paths, label)
+        artifacts.extend(view_artifacts)
+        indicators.extend(view_indicators)
+    return artifacts, indicators
+
+
+def click_deposit_methods(
+    browser: BrowserSession,
+    run_paths: RunPaths,
+    base_label: str,
+    logger: logging.Logger,
+    max_clicks: int = 6,
+) -> Tuple[List[str], List[Indicator]]:
+    artifacts: List[str] = []
+    indicators: List[Indicator] = []
+    page = browser.page
+    clicks = 0
+    for keyword in DEPOSIT_METHOD_KEYWORDS:
+        if clicks >= max_clicks:
+            break
+        clicked = click_by_text(page, keyword, logger=logger)
+        if not clicked:
+            continue
+        clicks += 1
+        page.wait_for_timeout(600)
+        label = f"{base_label}_method_{clicks:02d}_{sanitize_filename(keyword)}"
+        view_artifacts, view_indicators = capture_page_state(browser, run_paths, label)
+        artifacts.extend(view_artifacts)
+        indicators.extend(view_indicators)
+    return artifacts, indicators
