@@ -117,6 +117,23 @@ def submit_form(
         log.debug("No submit control or fallback field available")
 
 
+def submit_form_element(
+    form: ElementHandle, *, logger: Optional[logging.Logger] = None
+) -> None:
+    log = _resolve_logger(logger)
+    submit = _query_first(form, SUBMIT_SELECTORS)
+    if submit:
+        submit.click()
+        log.debug("Clicked submit control on form element")
+        return
+    fallback = form.query_selector("input, select, textarea")
+    if fallback:
+        fallback.press("Enter")
+        log.debug("Submit fallback via Enter key on first control")
+    else:
+        log.debug("Unable to find submit control or fallback input on form")
+
+
 KEYWORD_CLICKS = (
     "register",
     "sign up",
