@@ -16,11 +16,14 @@ from .field_errors import FieldError, extract_field_errors, interpret_field_erro
 from .form_detection import find_best_registration_form
 from .form_filling import FieldFillResult, apply_assignments
 from .form_models import FormDescriptor
+from .generic_planner import plan_generic_required_fillers
 from .io_utils import RunPaths, relative_artifact_path, write_json
 from .network_capture import NetworkCapture
 from .registration_evaluator import evaluate_registration_result
 from .value_assignment import (
+    FieldAssignment,
     FieldDecision,
+    FieldSemantic,
     RegistrationContext,
     ValuePlan,
     adjust_value_for_retry,
@@ -256,6 +259,26 @@ def _perform_attempt(
     _log_field_classifications(classifications, logger)
     assignments, decisions = assign_registration_values(classifications, context)
     _log_decisions(decisions, logger)
+
+    planned_names = {
+        assignment.descriptor.canonical_name() for assignment in assignments
+    }
+    generic_plans = plan_generic_required_fillers(form_descriptor.fields, planned_names)
+    for generic in generic_plans:
+        assignments.append(
+            FieldAssignment(
+                descriptor=generic.descriptor,
+                semantic=FieldSemantic.GENERIC_TEXT,
+                plan=generic.plan,
+                required=True,
+                confidence=0.0,
+            )
+        )
+        logger.debug(
+            "Adding generic plan for %s via %s",
+            generic.descriptor.canonical_name(),
+            generic.plan.strategy,
+        )
 
     if not assignments:
         notes.append("No fields were eligible for auto-fill.")

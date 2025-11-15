@@ -33,7 +33,12 @@ class FieldDescriptor:
     order: int
 
     def canonical_name(self) -> str:
-        for candidate in (self.name, self.identifier, self.placeholder, self.aria_label):
+        for candidate in (
+            self.name,
+            self.identifier,
+            self.placeholder,
+            self.aria_label,
+        ):
             if candidate:
                 return candidate
         return f"field_{self.order}"
