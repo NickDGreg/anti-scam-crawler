@@ -7,6 +7,7 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
+from urllib.parse import urlparse
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -147,9 +148,14 @@ def run_extraction(inputs: ExtractInputs) -> Dict[str, object]:
                 artifacts.extend(scan_artifacts)
                 indicator_records.extend(scan_indicators)
 
+                login_form_present_flag = login_form_still_present(page, logger)
                 error_text = detect_error_banner(page, logger=logger)
                 logged_in = infer_login_success(
-                    page, pre_submit_url, error_text, logger=logger
+                    page,
+                    pre_submit_url,
+                    error_text,
+                    logger=logger,
+                    login_form_present=login_form_present_flag,
                 )
                 if error_text:
                     notes.append(error_text)
@@ -186,15 +192,37 @@ def infer_login_success(
     page,
     previous_url: str,
     error_text: str | None,
+    *,
     logger: logging.Logger | None = None,
+    login_form_present: bool = False,
 ) -> bool:
     log = logger or MODULE_LOGGER
     if error_text:
         log.info("Error banner present after login attempt: %s", error_text)
         return False
     if page.url != previous_url:
-        log.debug("URL changed after login submit (%s -> %s)", previous_url, page.url)
-        return True
+        prev = urlparse(previous_url)
+        curr = urlparse(page.url)
+        prev_host = (prev.hostname or "").lower().lstrip("www.")
+        curr_host = (curr.hostname or "").lower().lstrip("www.")
+        same_path = prev.path == curr.path
+        same_query = prev.query == curr.query
+        same_host = prev_host == curr_host
+        if not (same_path and same_host and same_query):
+            log.debug(
+                "URL changed after login submit (%s -> %s)", previous_url, page.url
+            )
+            return True
+        log.debug(
+            "URL change after login submit only differed by host normalization (%s -> %s)",
+            previous_url,
+            page.url,
+        )
+        if not login_form_present:
+            return True
+    if login_form_present:
+        log.debug("Login form still present after submit; treating as login failure")
+        return False
     for keyword in LOGGED_IN_HINTS:
         locator = page.get_by_text(re.compile(keyword, re.IGNORECASE))
         if locator.count() > 0:
@@ -279,9 +307,14 @@ def _tag_indicators(html: str, url: str, html_path: Path) -> List[Indicator]:
 
 
 def capture_page_state(
-    browser: BrowserSession, run_paths: RunPaths, label: str
+    browser: BrowserSession,
+    run_paths: RunPaths,
+    label: str,
+    logger: logging.Logger | None = None,
 ) -> Tuple[List[str], List[Indicator]]:
     page = browser.page
+    log = logger or MODULE_LOGGER
+    log.debug("Capturing page state '%s' at URL %s", label, page.url)
     html = page.content()
     html_path = save_text(run_paths.build_path(f"{label}.html"), html)
     screenshot_path = browser.screenshot(run_paths.build_path(f"{label}.png"))
@@ -313,7 +346,9 @@ def reveal_hidden_sections(
         clicks += 1
         page.wait_for_timeout(600)
         label = f"{base_label}_reveal_{clicks:02d}_{sanitize_filename(keyword)}"
-        view_artifacts, view_indicators = capture_page_state(browser, run_paths, label)
+        view_artifacts, view_indicators = capture_page_state(
+            browser, run_paths, label, logger
+        )
         artifacts.extend(view_artifacts)
         indicators.extend(view_indicators)
     return artifacts, indicators
@@ -339,7 +374,9 @@ def click_deposit_methods(
         clicks += 1
         page.wait_for_timeout(600)
         label = f"{base_label}_method_{clicks:02d}_{sanitize_filename(keyword)}"
-        view_artifacts, view_indicators = capture_page_state(browser, run_paths, label)
+        view_artifacts, view_indicators = capture_page_state(
+            browser, run_paths, label, logger
+        )
         artifacts.extend(view_artifacts)
         indicators.extend(view_indicators)
     return artifacts, indicators
@@ -348,7 +385,7 @@ def click_deposit_methods(
 def scan_current_view(
     browser: BrowserSession, run_paths: RunPaths, label: str, logger: logging.Logger
 ) -> Tuple[List[str], List[Indicator]]:
-    artifacts, indicators = capture_page_state(browser, run_paths, label)
+    artifacts, indicators = capture_page_state(browser, run_paths, label, logger)
     reveal_artifacts, reveal_indicators = reveal_hidden_sections(
         browser, run_paths, label, logger
     )
@@ -395,3 +432,12 @@ def is_deposit_context(page) -> bool:
     except PlaywrightError:
         return False
     return False
+
+
+def login_form_still_present(page, logger: logging.Logger | None = None) -> bool:
+    form = find_form(
+        page,
+        {"email": EMAIL_SELECTORS, "secret": SECRET_SELECTORS},
+        logger=logger,
+    )
+    return form is not None

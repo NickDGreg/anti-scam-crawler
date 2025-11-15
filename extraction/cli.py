@@ -9,6 +9,7 @@ from .extract import ExtractInputs, run_extraction
 from .io_utils import generate_run_id, prepare_run_directories, write_json
 from .logging_utils import build_logger
 from .register import DEFAULT_PASSWORD, RegisterInputs, run_registration
+from .test_login import launch_login_inspector
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,6 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-steps", type=int, default=5, help="Max exploration steps after login"
     )
 
+    debug_parser = subparsers.add_parser(
+        "debug-login",
+        help="Open a headed browser with Playwright pause for manual login testing",
+    )
+    debug_parser.add_argument("--url", required=True, help="Login page URL to open")
+
     return parser
 
 
@@ -55,9 +62,13 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    run_id = args.run_id or generate_run_id()
+    if args.command == "debug-login":
+        launch_login_inspector(args.url)
+        return
+
+    run_id = getattr(args, "run_id", None) or generate_run_id()
     run_paths = prepare_run_directories(run_id, args.command)
-    logger = build_logger(run_paths, verbose=args.verbose)
+    logger = build_logger(run_paths, verbose=getattr(args, "verbose", False))
 
     if args.command == "register":
         inputs = RegisterInputs(
@@ -68,7 +79,7 @@ def main(argv: list[str] | None = None) -> None:
             logger=logger,
         )
         result = run_registration(inputs)
-    else:
+    elif args.command == "extract":
         inputs = ExtractInputs(
             url=args.url,
             email=args.email,
@@ -78,6 +89,8 @@ def main(argv: list[str] | None = None) -> None:
             max_steps=args.max_steps,
         )
         result = run_extraction(inputs)
+    else:
+        parser.error(f"Unknown command: {args.command}")
 
     summary_path = run_paths.base_dir / f"{args.command}.json"
     write_json(summary_path, result)
