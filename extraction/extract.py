@@ -15,10 +15,8 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from .automation import (
     AUTH_KEYWORDS,
     EMAIL_SELECTORS,
-    KEYWORD_CLICKS,
     SECRET_SELECTORS,
     click_by_text,
-    click_keywords,
     detect_error_banner,
     fill_form_fields,
     find_form,
@@ -72,6 +70,7 @@ DEPOSIT_CONTEXT_HINTS = (
     "finance",
     "top up",
 )
+LOGIN_PATH_HINTS = ("login", "signin", "sign-in", "sign_in")
 
 
 @dataclass(slots=True)
@@ -103,19 +102,11 @@ def run_extraction(inputs: ExtractInputs) -> Dict[str, object]:
             artifacts.append(relative_artifact_path(landing_shot))
 
             logger.debug("Looking for login form on %s", page.url)
-            form = find_form(
-                page,
-                {"email": EMAIL_SELECTORS, "secret": SECRET_SELECTORS},
-                logger=logger,
-            )
+            form = get_login_form(page, logger=logger)
             if not form:
                 logger.debug("Login form not found, attempting auth navigation")
                 navigate_to_login(page, logger=logger)
-                form = find_form(
-                    page,
-                    {"email": EMAIL_SELECTORS, "secret": SECRET_SELECTORS},
-                    logger=logger,
-                )
+                form = get_login_form(page, logger=logger)
 
             if not form:
                 status = "no_form_found"
@@ -124,46 +115,32 @@ def run_extraction(inputs: ExtractInputs) -> Dict[str, object]:
                 )
                 logger.warning("Login form still missing after heuristics")
             else:
-                logger.debug("Login form located, populating credentials")
-                fill_form_fields(
-                    form,
-                    {"email": inputs.email, "secret": inputs.secret},
-                    logger=logger,
-                )
-                pre_submit_url = page.url
-                logger.debug("Submitting login form")
-                submit_form(form, logger=logger)
-                try:
-                    page.wait_for_load_state("networkidle", timeout=10000)
-                except PlaywrightTimeoutError:
-                    logger.debug(
-                        "Login submission did not trigger navigation within timeout"
-                    )
-                final_url = page.url
-                logger.debug("Post-login URL candidate: %s", final_url)
-
-                scan_artifacts, scan_indicators = scan_current_view(
-                    browser, run_paths, "01_post_login", logger
-                )
-                artifacts.extend(scan_artifacts)
-                indicator_records.extend(scan_indicators)
-
-                login_form_present_flag = login_form_still_present(page, logger)
-                error_text = detect_error_banner(page, logger=logger)
-                logged_in = infer_login_success(
+                logger.debug("Login form located, attempting authentication")
+                success, attempt_error = attempt_login_with_retries(
                     page,
-                    pre_submit_url,
-                    error_text,
+                    email=inputs.email,
+                    secret=inputs.secret,
                     logger=logger,
-                    login_form_present=login_form_present_flag,
                 )
-                if error_text:
-                    notes.append(error_text)
-                if not logged_in:
+                final_url = page.url
+
+                if not success:
                     status = "login_failed"
-                    logger.warning("Login appears to have failed")
+                    if attempt_error:
+                        notes.append(attempt_error)
+                    else:
+                        notes.append(
+                            "Login attempts did not transition away from the login page."
+                        )
+                    logger.warning("Login failed after retries")
                 else:
                     status = "complete"
+                    logger.debug("Login succeeded; starting exploration")
+                    scan_artifacts, scan_indicators = scan_current_view(
+                        browser, run_paths, "01_post_login", logger
+                    )
+                    artifacts.extend(scan_artifacts)
+                    indicator_records.extend(scan_indicators)
                     logger.debug("Login succeeded; starting exploration")
                     more_artifacts, more_indicators = explore_interesting_pages(
                         browser, inputs.max_steps, run_paths, logger
@@ -200,34 +177,38 @@ def infer_login_success(
     if error_text:
         log.info("Error banner present after login attempt: %s", error_text)
         return False
-    if page.url != previous_url:
-        prev = urlparse(previous_url)
-        curr = urlparse(page.url)
-        prev_host = (prev.hostname or "").lower().lstrip("www.")
-        curr_host = (curr.hostname or "").lower().lstrip("www.")
-        same_path = prev.path == curr.path
-        same_query = prev.query == curr.query
-        same_host = prev_host == curr_host
+
+    prev = urlparse(previous_url)
+    curr = urlparse(page.url)
+    prev_host = (prev.hostname or "").lower().lstrip("www.")
+    curr_host = (curr.hostname or "").lower().lstrip("www.")
+    same_path = prev.path == curr.path
+    same_query = prev.query == curr.query
+    same_host = prev_host == curr_host
+    curr_path = curr.path or ""
+
+    if is_login_path(curr_path) and login_form_present:
+        log.debug("Still on login path '%s' with login form visible", curr_path)
+        return False
+
+    if not is_login_path(curr_path):
+        for keyword in LOGGED_IN_HINTS:
+            locator = page.get_by_text(re.compile(keyword, re.IGNORECASE))
+            if locator.count() > 0:
+                log.debug("Detected logged-in hint '%s' on page", keyword)
+                return True
         if not (same_path and same_host and same_query):
             log.debug(
                 "URL changed after login submit (%s -> %s)", previous_url, page.url
             )
             return True
-        log.debug(
-            "URL change after login submit only differed by host normalization (%s -> %s)",
-            previous_url,
-            page.url,
-        )
-        if not login_form_present:
-            return True
+    else:
+        log.debug("Current path '%s' still resembles a login route", curr_path)
+
     if login_form_present:
         log.debug("Login form still present after submit; treating as login failure")
         return False
-    for keyword in LOGGED_IN_HINTS:
-        locator = page.get_by_text(re.compile(keyword, re.IGNORECASE))
-        if locator.count() > 0:
-            log.debug("Detected logged-in hint '%s' on page", keyword)
-            return True
+
     log.debug("No sign of logged-in state detected")
     return False
 
@@ -286,16 +267,86 @@ def explore_interesting_pages(
     return artifacts, indicators
 
 
+def get_login_form(page, *, logger: logging.Logger | None = None):
+    return find_form(
+        page,
+        {"email": EMAIL_SELECTORS, "secret": SECRET_SELECTORS},
+        logger=logger,
+    )
+
+
 def navigate_to_login(page, *, logger: logging.Logger, max_clicks: int = 5) -> None:
     clicks = 0
     for keyword in AUTH_KEYWORDS:
         if clicks >= max_clicks:
             break
+        if get_login_form(page, logger=logger):
+            logger.debug("Login form detected during auth navigation; stopping")
+            return
         logger.debug("Attempting to reach login via keyword '%s'", keyword)
         clicked = click_by_text(page, keyword, logger=logger)
         if clicked:
             clicks += 1
             page.wait_for_timeout(800)
+            if get_login_form(page, logger=logger):
+                logger.debug("Login form detected after clicking '%s'", keyword)
+                return
+    logger.debug("Auth navigation finished without detecting login form")
+
+
+def attempt_login_with_retries(
+    page,
+    *,
+    email: str,
+    secret: str,
+    logger: logging.Logger,
+    max_attempts: int = 2,
+) -> Tuple[bool, str | None]:
+    last_error: str | None = None
+    for attempt in range(1, max_attempts + 1):
+        form = get_login_form(page, logger=logger)
+        if not form:
+            logger.warning("Login form missing before attempt %d", attempt)
+            break
+
+        logger.debug("Login attempt %d: populating credentials", attempt)
+        fill_form_fields(form, {"email": email, "secret": secret}, logger=logger)
+        pre_submit_url = page.url
+        logger.debug("Submitting login form (attempt %d)", attempt)
+        submit_form(form, logger=logger)
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.debug(
+                "Login attempt %d did not trigger navigation within timeout", attempt
+            )
+
+        login_form_present_flag = login_form_still_present(page, logger)
+        error_text = detect_error_banner(page, logger=logger)
+        success = infer_login_success(
+            page,
+            pre_submit_url,
+            error_text,
+            logger=logger,
+            login_form_present=login_form_present_flag,
+        )
+        logger.debug(
+            "Login attempt %d result: success=%s (pre=%s -> post=%s)",
+            attempt,
+            success,
+            pre_submit_url,
+            page.url,
+        )
+        if success:
+            return True, error_text
+        last_error = error_text
+        if error_text:
+            logger.warning("Login attempt %d returned error: %s", attempt, error_text)
+            break
+        logger.debug(
+            "Login attempt %d failed without explicit error; retrying", attempt
+        )
+    return False, last_error
 
 
 def _tag_indicators(html: str, url: str, html_path: Path) -> List[Indicator]:
@@ -409,6 +460,11 @@ def click_menu(page, *, logger: logging.Logger) -> bool:
     return False
 
 
+def is_login_path(path: str) -> bool:
+    normalized = (path or "").lower()
+    return any(hint in normalized for hint in LOGIN_PATH_HINTS)
+
+
 def is_deposit_context(page) -> bool:
     url_lower = page.url.lower()
     if any(hint in url_lower for hint in DEPOSIT_CONTEXT_HINTS):
@@ -435,9 +491,5 @@ def is_deposit_context(page) -> bool:
 
 
 def login_form_still_present(page, logger: logging.Logger | None = None) -> bool:
-    form = find_form(
-        page,
-        {"email": EMAIL_SELECTORS, "secret": SECRET_SELECTORS},
-        logger=logger,
-    )
+    form = get_login_form(page, logger=logger)
     return form is not None
