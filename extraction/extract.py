@@ -285,7 +285,15 @@ def explore_interesting_pages(
             if steps >= max_steps:
                 break
             logger.debug("Exploration step %d: looking for '%s'", steps + 1, keyword)
-            clicked = click_by_text(page, keyword, logger=logger)
+            try:
+                clicked = click_by_text(page, keyword, logger=logger)
+            except PlaywrightError as exc:
+                logger.warning(
+                    "Keyword click failed for '%s'; skipping interaction: %s",
+                    keyword,
+                    exc,
+                )
+                continue
             if not clicked:
                 continue
             steps += 1
