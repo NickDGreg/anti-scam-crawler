@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import re
 from dataclasses import dataclass
-from typing import Iterable, List
+from typing import Iterable, List, Tuple
 
 
 @dataclass(slots=True)
@@ -61,11 +61,24 @@ def _collect(pattern: re.Pattern[str], text: str, indicator_type: str, source_ur
     return indicators
 
 
-def extract_indicators(raw_html: str, source_url: str) -> List[Indicator]:
+def extract_indicators(
+    raw_html: str,
+    source_url: str,
+    *,
+    extra_strings: Iterable[Tuple[str, str]] | None = None,
+) -> List[Indicator]:
     plain_text = strip_html(raw_html)
     raw_text = html.unescape(raw_html)
+    corpora: List[str] = [plain_text, raw_text]
+    if extra_strings:
+        for label, text in extra_strings:
+            if not text:
+                continue
+            prefix = f"{label}: " if label else ""
+            corpora.append(f"{prefix}{text}")
+
     found: List[Indicator] = []
-    for corpus in (plain_text, raw_text):
+    for corpus in corpora:
         found.extend(_collect(IBAN_PATTERN, corpus, "IBAN", source_url))
         found.extend(_collect(BTC_PATTERN, corpus, "BTC", source_url))
         found.extend(_collect(ETH_PATTERN, corpus, "ETH", source_url))
