@@ -1,12 +1,14 @@
 # Anti-Scam Toolkit
 
 Small CLI utility for driving a headless browser against suspicious investment portals.
-The tool exposes two subcommands:
+The tool exposes several subcommands:
 
-| Command   | Purpose                                                     |
-|-----------|-------------------------------------------------------------|
-| `register` | Find a registration form, populate it, and submit it.       |
-| `extract`  | Log in with existing credentials and hunt for deposit data. |
+| Command      | Purpose                                                                 |
+|--------------|-------------------------------------------------------------------------|
+| `register`   | Find a registration form, populate it, and submit it.                   |
+| `extract`    | Log in with existing credentials and run the legacy deep-dive probe.    |
+| `map`        | Log in, then run the ArchivalCrawler to snapshot pages and record a site map. |
+| `debug-login`| Launch a headed browser with Playwright’s inspector for manual testing. |
 
 ## Runtime prerequisites
 
@@ -37,6 +39,29 @@ python -m anti_scam extract \
   --secret Sup3rSafe! \
   --max-steps 5
 ```
+
+### Map (ArchivalCrawler)
+
+```bash
+python -m anti_scam map \
+  --url https://example.com/dashboard \
+  --email user@example.com \
+  --secret Sup3rSafe! \
+  --max-pages 100 \
+  --max-depth 3 \
+  --allow-external \
+  --verbose
+```
+
+Use `--allow-external` if you want to follow outbound links; omit it to stay on the starting origin. As with other commands, `--run-id` can be supplied to write into an existing `data/<run_id>` directory.
+
+### Debug Login
+
+```bash
+python -m anti_scam debug-login --url https://example.com/login
+```
+
+Opens Chromium with Playwright’s inspector enabled so you can manually explore or record selectors before running automation.
 
 ### Output & artefacts
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 
+from .archival_crawler import MappingInputs, run_mapping
 from .extract import ExtractInputs, run_extraction
 from .io_utils import generate_run_id, prepare_run_directories, write_json
 from .logging_utils import build_logger
@@ -40,6 +41,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     extract_parser.add_argument(
         "--max-steps", type=int, default=5, help="Max exploration steps after login"
+    )
+
+    map_parser = subparsers.add_parser(
+        "map",
+        help="Run the archival crawler to snapshot the site after login.",
+        parents=[common],
+    )
+    _add_common_arguments(map_parser)
+    map_parser.add_argument(
+        "--max-pages", type=int, default=100, help="Maximum number of pages to archive"
+    )
+    map_parser.add_argument(
+        "--max-depth", type=int, default=3, help="Maximum BFS depth to traverse"
+    )
+    map_parser.add_argument(
+        "--allow-external",
+        action="store_true",
+        help="Allow navigation outside the starting origin",
+    )
+    map_parser.add_argument(
+        "--secret", required=True, help="Password or token for login"
     )
 
     debug_parser = subparsers.add_parser(
@@ -89,6 +111,19 @@ def main(argv: list[str] | None = None) -> None:
             max_steps=args.max_steps,
         )
         result = run_extraction(inputs)
+    elif args.command == "map":
+        inputs = MappingInputs(
+            start_url=args.url,
+            email=args.email,
+            secret=args.secret,
+            run_paths=run_paths,
+            logger=logger,
+            max_pages=args.max_pages,
+            max_depth=args.max_depth,
+            same_origin_only=not args.allow_external,
+        )
+        mapping_result = run_mapping(inputs)
+        result = mapping_result.to_dict()
     else:
         parser.error(f"Unknown command: {args.command}")
 
