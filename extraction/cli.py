@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
 from .archival_crawler import MappingInputs, run_mapping
+from .archive_scanner import ArchiveScanInputs, run_archive_scan
 from .extract import ExtractInputs, run_extraction
 from .io_utils import generate_run_id, prepare_run_directories, write_json
 from .logging_utils import build_logger
@@ -62,6 +64,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     map_parser.add_argument(
         "--secret", required=True, help="Password or token for login"
+    )
+
+    scan_parser = subparsers.add_parser(
+        "scan-archive",
+        help="Run offline regex extraction against archived HTML (mapping.json required).",
+        parents=[common],
+    )
+    scan_parser.add_argument(
+        "--archive-dir",
+        required=True,
+        help="Path to the archive directory containing mapping.json (e.g., data/<run_id>/map)",
     )
 
     debug_parser = subparsers.add_parser(
@@ -124,6 +137,11 @@ def main(argv: list[str] | None = None) -> None:
         )
         mapping_result = run_mapping(inputs)
         result = mapping_result.to_dict()
+    elif args.command == "scan-archive":
+        archive_dir = Path(args.archive_dir).expanduser().resolve()
+        inputs = ArchiveScanInputs(archive_dir=archive_dir, logger=logger)
+        scan_result = run_archive_scan(inputs)
+        result = scan_result.to_dict()
     else:
         parser.error(f"Unknown command: {args.command}")
 

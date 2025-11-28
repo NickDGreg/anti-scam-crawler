@@ -8,6 +8,7 @@ The tool exposes several subcommands:
 | `register`   | Find a registration form, populate it, and submit it.                   |
 | `extract`    | Log in with existing credentials and run the legacy deep-dive probe.    |
 | `map`        | Log in, then run the ArchivalCrawler to snapshot pages and record a site map. |
+| `scan-archive` | Run offline regex extraction against archived HTML from a mapping run. |
 | `debug-login`| Launch a headed browser with Playwright’s inspector for manual testing. |
 
 ## Runtime prerequisites
@@ -54,6 +55,16 @@ python -m anti_scam map \
 ```
 
 Use `--allow-external` if you want to follow outbound links; omit it to stay on the starting origin. As with other commands, `--run-id` can be supplied to write into an existing `data/<run_id>` directory.
+
+### Scan Archive (offline regex extraction)
+
+```bash
+python -m anti_scam scan-archive \
+  --archive-dir data/20251128-130108-7f5b/map \
+  --verbose
+```
+
+This reads `mapping.json` in the specified directory, scans each archived HTML with the regex extractor, and writes `extraction_results.json` alongside the artifacts. No browser or Playwright is needed for this step.
 
 ### Debug Login
 
