@@ -38,7 +38,7 @@ def apply_assignments(
         field_name = descriptor.canonical_name()
         preview = _mask_value(assignment.semantic, assignment.plan.value)
         try:
-            _fill_control(descriptor, assignment)
+            _fill_control(descriptor, assignment, logger)
             logger.debug(
                 "Filled %s (%s) with strategy %s",
                 field_name,
@@ -71,7 +71,9 @@ def apply_assignments(
     return results
 
 
-def _fill_control(descriptor: FieldDescriptor, assignment: FieldAssignment) -> None:
+def _fill_control(
+    descriptor: FieldDescriptor, assignment: FieldAssignment, logger: logging.Logger
+) -> None:
     handle = descriptor.handle
     value = assignment.plan.value
 
@@ -89,14 +91,48 @@ def _fill_control(descriptor: FieldDescriptor, assignment: FieldAssignment) -> N
     input_type = (descriptor.input_type or "text").lower()
     if input_type == "checkbox":
         should_check = bool(value)
-        currently_checked = handle.is_checked()
-        if should_check and not currently_checked:
+        before_checked = handle.is_checked()
+        before_js_checked = handle.evaluate("el => el.checked")
+        logger.debug(
+            "Checkbox %s before: is_checked=%s js_checked=%s",
+            descriptor.canonical_name(),
+            before_checked,
+            before_js_checked,
+        )
+        if should_check and not before_checked:
             try:
                 handle.check()
             except Exception:
-                handle.check(force=True)
-        elif not should_check and currently_checked:
-            handle.uncheck()
+                handle.evaluate(
+                    """
+                    el => {
+                        el.checked = true;
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    """
+                )
+        elif not should_check and before_checked:
+            try:
+                handle.uncheck()
+            except Exception:
+                handle.evaluate(
+                    """
+                    el => {
+                        el.checked = false;
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    """
+                )
+        after_checked = handle.is_checked()
+        after_js_checked = handle.evaluate("el => el.checked")
+        logger.debug(
+            "Checkbox %s after: is_checked=%s js_checked=%s",
+            descriptor.canonical_name(),
+            after_checked,
+            after_js_checked,
+        )
         return
 
     if not handle.is_editable():
