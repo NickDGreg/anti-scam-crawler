@@ -18,10 +18,13 @@ DEFAULT_COUNTRY_FALLBACK = "United States"
 DEFAULT_CURRENCY = "USD"
 PREFERRED_CURRENCIES = ["usd", "eur", "gbp"]
 DEFAULT_GENDER = "Male"
+DEFAULT_ADDRESS = "123 Main Street"
+DEFAULT_CITY = "London"
+DEFAULT_POSTAL = "90210"
 GENERIC_PLACEHOLDER = "autofilled"
 
 SEMANTIC_LIMITS = {
-    FieldSemantic.EMAIL: 1,
+    FieldSemantic.EMAIL: 2,
     FieldSemantic.PASSWORD: 1,
     FieldSemantic.PASSWORD_CONFIRM: 1,
     FieldSemantic.USERNAME: 1,
@@ -157,7 +160,10 @@ def _plan_value_for_semantic(
     descriptor = classification.descriptor
 
     if semantic == FieldSemantic.EMAIL:
-        return ValuePlan(value=context.email, strategy="provided_email")
+        strategy = "provided_email"
+        if _is_confirm_email_field(descriptor):
+            strategy = "confirm_email"
+        return ValuePlan(value=context.email, strategy=strategy)
     if semantic == FieldSemantic.PASSWORD:
         return ValuePlan(value=context.password, strategy="provided_password")
     if semantic == FieldSemantic.PASSWORD_CONFIRM:
@@ -219,7 +225,7 @@ def _plan_value_for_semantic(
     if semantic == FieldSemantic.TERMS:
         return ValuePlan(value=True, strategy="accept_terms")
     if semantic == FieldSemantic.GENERIC_TEXT:
-        return ValuePlan(value=f"user-{context.run_id[:6]}", strategy="generic_text")
+        return _plan_generic_text(descriptor, context)
     if semantic == FieldSemantic.UNKNOWN and descriptor.required:
         return ValuePlan(
             value=f"{GENERIC_PLACEHOLDER}-{context.run_id[:4]}",
@@ -318,6 +324,48 @@ def _generate_numeric_string(length: int) -> str:
     repeats = (length // len(pattern)) + 1
     value = (pattern * repeats)[:length]
     return value
+
+
+def _is_confirm_email_field(descriptor: FieldDescriptor) -> bool:
+    text = " ".join(
+        value
+        for value in (
+            descriptor.name,
+            descriptor.identifier,
+            descriptor.placeholder,
+            " ".join(descriptor.labels),
+        )
+        if value
+    ).lower()
+    confirm_keywords = ("confirm", "repeat", "re-enter", "reenter", "verify", "again")
+    return any(keyword in text for keyword in confirm_keywords)
+
+
+def _plan_generic_text(
+    descriptor: FieldDescriptor, context: RegistrationContext
+) -> ValuePlan:
+    tokens = " ".join(
+        value
+        for value in (
+            descriptor.name,
+            descriptor.identifier,
+            descriptor.placeholder,
+            " ".join(descriptor.labels),
+            descriptor.surrounding_text,
+        )
+        if value
+    ).lower()
+
+    if "name" in tokens:
+        return ValuePlan(value=DEFAULT_FULL_NAME, strategy="generic_full_name")
+    if "address" in tokens:
+        return ValuePlan(value=DEFAULT_ADDRESS, strategy="generic_address")
+    if "city" in tokens:
+        return ValuePlan(value=DEFAULT_CITY, strategy="generic_city")
+    if "zip" in tokens or "postal" in tokens or "postcode" in tokens:
+        return ValuePlan(value=DEFAULT_POSTAL, strategy="generic_postal")
+
+    return ValuePlan(value=f"user-{context.run_id[:6]}", strategy="generic_text")
 
 
 __all__ = [

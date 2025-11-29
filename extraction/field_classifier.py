@@ -49,7 +49,7 @@ USERNAME_KEYWORDS = [
     "userid",
     "nick",
 ]
-FULLNAME_KEYWORDS = ["full name", "your name"]
+FULLNAME_KEYWORDS = ["full name", "fullname", "full-name", "your name"]
 FIRST_NAME_KEYWORDS = ["first name", "firstname", "given name"]
 LAST_NAME_KEYWORDS = ["last name", "lastname", "surname", "family name"]
 PHONE_KEYWORDS = ["phone", "mobile", "telephone", "tel", "cell"]
@@ -158,6 +158,8 @@ def classify_field(field: FieldDescriptor) -> FieldClassification:
     )
     if input_type == "text" and "user" in tokens:
         scores[FieldSemantic.USERNAME] += 0.3
+    if re.search(r"\bname\b", tokens) and not re.search(r"\buser(name)?\b", tokens):
+        scores[FieldSemantic.FULL_NAME] += 1.0
 
     _apply_keyword_scores(tokens, FULLNAME_KEYWORDS, FieldSemantic.FULL_NAME, scores)
     _apply_keyword_scores(tokens, FIRST_NAME_KEYWORDS, FieldSemantic.FIRST_NAME, scores)
@@ -230,7 +232,6 @@ def _collect_tokens(field: FieldDescriptor) -> str:
         field.aria_label,
         " ".join(field.labels),
         field.surrounding_text,
-        " ".join(field.classes),
     ):
         if value:
             pieces.append(value)

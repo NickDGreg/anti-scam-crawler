@@ -164,10 +164,14 @@ def _discover_registration_form(
     page: Page, logger: logging.Logger
 ) -> Tuple[Optional[FormDescriptor], List[FieldClassification]]:
     form_descriptor, classifications = find_best_registration_form(page, logger)
-    if form_descriptor:
+    if form_descriptor and not _is_weak_registration_candidate(
+        form_descriptor, classifications
+    ):
         return form_descriptor, classifications
 
-    logger.debug("Registration form not detected; clicking navigation heuristics")
+    logger.debug(
+        "Registration form not detected or appears weak; clicking navigation heuristics"
+    )
     click_keywords(page, KEYWORD_CLICKS, max_clicks=4, logger=logger)
     return find_best_registration_form(page, logger)
 
@@ -422,3 +426,28 @@ def _serialize_field_errors(errors: List[FieldError]) -> List[Dict[str, str]]:
         }
         for err in errors
     ]
+
+
+def _is_weak_registration_candidate(
+    descriptor: FormDescriptor, classifications: List[FieldClassification]
+) -> bool:
+    semantics = {cls.semantic for cls in classifications}
+    has_password = FieldSemantic.PASSWORD in semantics
+    has_username = FieldSemantic.USERNAME in semantics
+    has_password_confirm = FieldSemantic.PASSWORD_CONFIRM in semantics
+    has_textarea = any(cls.descriptor.tag == "textarea" for cls in classifications)
+
+    contact_text = (
+        f"{descriptor.heading_text} {descriptor.inner_text} {descriptor.action or ''}"
+    ).lower()
+    contact_hits = any(
+        keyword in contact_text for keyword in ("contact", "support", "message", "help")
+    )
+
+    if contact_hits and not has_password:
+        return True
+    if has_textarea and not has_password and len(descriptor.fields) <= 4:
+        return True
+    if not (has_password or has_username or has_password_confirm):
+        return True
+    return False

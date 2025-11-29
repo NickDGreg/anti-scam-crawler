@@ -23,6 +23,8 @@ REGISTRATION_KEYWORDS = (
 )
 LOGIN_KEYWORDS = ("log in", "login", "sign in", "client area")
 MIN_REGISTRATION_SCORE = 20
+CONTACT_KEYWORDS = ("contact", "support", "message", "help", "assist")
+CONTACT_ACTION_KEYWORDS = ("contact", "support", "help", "ticket", "message")
 
 
 def find_best_registration_form(
@@ -62,6 +64,8 @@ def extract_form_descriptors(page: Page) -> List[FormDescriptor]:
         fields = _extract_fields(form)
         heading_text = (form.inner_text() or "").strip()
         inner_text = heading_text.lower()
+        action = form.get_attribute("action")
+        method = form.get_attribute("method")
         descriptors.append(
             FormDescriptor(
                 element=form,
@@ -69,6 +73,8 @@ def extract_form_descriptors(page: Page) -> List[FormDescriptor]:
                 index=index,
                 heading_text=heading_text,
                 inner_text=inner_text,
+                action=action,
+                method=method,
             )
         )
     return descriptors
@@ -178,16 +184,19 @@ def score_form_candidate(
     signals = {}
 
     counts = _semantic_counts(classifications)
-    if counts.get(FieldSemantic.PASSWORD, 0):
+    has_password = counts.get(FieldSemantic.PASSWORD, 0) > 0
+    has_username = counts.get(FieldSemantic.USERNAME, 0) > 0
+    has_email = counts.get(FieldSemantic.EMAIL, 0) > 0
+    if has_password:
         score += 25
         signals["password"] = 25
-    if counts.get(FieldSemantic.EMAIL, 0):
+    if has_email:
         score += 20
         signals["email"] = 20
     if counts.get(FieldSemantic.PASSWORD_CONFIRM, 0):
         score += 10
         signals["password_confirm"] = 10
-    if counts.get(FieldSemantic.USERNAME, 0):
+    if has_username:
         score += 6
         signals["username"] = 6
     name_signals = (
@@ -237,6 +246,18 @@ def score_form_candidate(
         signals["confidence"] = confidence_bonus
         score += confidence_bonus
 
+    # penalize forms that look like contact/support forms
+    contact_penalty = 0.0
+    if _has_textarea(descriptor) and not has_password:
+        contact_penalty += 8
+    if _is_contact_like_form(descriptor):
+        contact_penalty += 8
+    if not has_password and not has_username:
+        contact_penalty += 4
+    if contact_penalty:
+        score -= contact_penalty
+        signals["contact_penalty"] = -contact_penalty
+
     return score, signals
 
 
@@ -245,6 +266,22 @@ def _semantic_counts(classifications: Sequence[FieldClassification]) -> dict:
     for cls in classifications:
         counts[cls.semantic] = counts.get(cls.semantic, 0) + 1
     return counts
+
+
+def _has_textarea(descriptor: FormDescriptor) -> bool:
+    return any(field.tag == "textarea" for field in descriptor.fields)
+
+
+def _is_contact_like_form(descriptor: FormDescriptor) -> bool:
+    action = (descriptor.action or "").lower()
+    text = f"{descriptor.heading_text} {descriptor.inner_text}".lower()
+    if any(keyword in text for keyword in CONTACT_KEYWORDS):
+        return True
+    if any(keyword in action for keyword in CONTACT_ACTION_KEYWORDS):
+        return True
+    if len(descriptor.fields) <= 4 and _has_textarea(descriptor):
+        return True
+    return False
 
 
 __all__ = [

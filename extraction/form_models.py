@@ -51,6 +51,8 @@ class FormDescriptor:
     index: int
     heading_text: str
     inner_text: str
+    action: Optional[str]
+    method: Optional[str]
     score: float = 0.0
     signals: Dict[str, float] = field(default_factory=dict)
 

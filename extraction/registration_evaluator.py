@@ -61,7 +61,9 @@ def evaluate_registration_result(
     logger: Optional[logging.Logger] = None,
 ) -> SubmissionOutcome:
     log = logger or logging.getLogger(__name__)
-    error_message = _detect_keyword_message(page, ERROR_SELECTORS, ERROR_KEYWORDS)
+    error_message = _detect_keyword_message(
+        page, ERROR_SELECTORS, ERROR_KEYWORDS, include_body=True
+    )
     if error_message:
         log.info("Detected validation failure: %s", error_message)
         return SubmissionOutcome(
@@ -78,9 +80,13 @@ def evaluate_registration_result(
 
 
 def _detect_keyword_message(
-    page: Page, selectors: tuple[str, ...], keywords: tuple[str, ...]
+    page: Page,
+    selectors: tuple[str, ...],
+    keywords: tuple[str, ...],
+    *,
+    include_body: bool,
 ) -> Optional[str]:
-    texts = _collect_text_candidates(page, selectors)
+    texts = _collect_text_candidates(page, selectors, include_body=include_body)
     for text in texts:
         lowered = text.lower()
         for keyword in keywords:
@@ -96,11 +102,8 @@ def _detect_success(page: Page, previous_url: str) -> Optional[str]:
         for keyword in SUCCESS_URL_KEYWORDS:
             if keyword in lowered:
                 return f"URL contains '{keyword}'"
-    texts = _collect_text_candidates(page, SUCCESS_SELECTORS)
-    if not texts:
-        body_text = _safe_inner_text(page, "body")
-        if body_text:
-            texts.append(body_text)
+    include_body = not _page_has_forms(page)
+    texts = _collect_text_candidates(page, SUCCESS_SELECTORS, include_body=include_body)
     for text in texts:
         lowered = text.lower()
         for keyword in SUCCESS_KEYWORDS:
@@ -109,7 +112,9 @@ def _detect_success(page: Page, previous_url: str) -> Optional[str]:
     return None
 
 
-def _collect_text_candidates(page: Page, selectors: tuple[str, ...]) -> List[str]:
+def _collect_text_candidates(
+    page: Page, selectors: tuple[str, ...], *, include_body: bool
+) -> List[str]:
     texts: List[str] = []
     for selector in selectors:
         locator = page.locator(selector)
@@ -121,11 +126,18 @@ def _collect_text_candidates(page: Page, selectors: tuple[str, ...]) -> List[str
             entry = entry.strip()
             if entry:
                 texts.append(entry)
-    # Always include a trimmed sample from the body for error scans
-    body_text = _safe_inner_text(page, "body")
-    if body_text:
-        texts.append(body_text)
+    if include_body:
+        body_text = _safe_inner_text(page, "body")
+        if body_text:
+            texts.append(body_text)
     return texts
+
+
+def _page_has_forms(page: Page) -> bool:
+    try:
+        return page.query_selector("form") is not None
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _safe_inner_text(page: Page, selector: str) -> Optional[str]:

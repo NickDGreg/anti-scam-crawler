@@ -91,9 +91,17 @@ def _fill_control(descriptor: FieldDescriptor, assignment: FieldAssignment) -> N
         should_check = bool(value)
         currently_checked = handle.is_checked()
         if should_check and not currently_checked:
-            handle.check()
+            try:
+                handle.check()
+            except Exception:
+                handle.check(force=True)
         elif not should_check and currently_checked:
             handle.uncheck()
+        return
+
+    if not handle.is_editable():
+        if assignment.required:
+            raise ValueError("Field not editable")
         return
 
     handle.click()
