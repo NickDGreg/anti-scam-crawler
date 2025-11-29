@@ -886,19 +886,34 @@ def explore_deposit_form(
         max_payment_options,
     )
     for idx, option in enumerate(payment_options):
-        if page.url != deposit_url:
+        try:
+            page.goto(deposit_url, wait_until="networkidle")
+        except PlaywrightError as exc:
+            logger.warning(
+                "Failed to load deposit page before option '%s': %s",
+                option.label or option.value or f"option-{idx + 1}",
+                exc,
+            )
+            break
+
+        detection = _find_deposit_form_with_payments(page, logger)
+        if not detection:
+            logger.debug(
+                "Deposit form missing when processing option %d; retrying reload",
+                idx + 1,
+            )
             try:
                 page.goto(deposit_url, wait_until="networkidle")
             except PlaywrightError as exc:
                 logger.warning(
-                    "Failed to return to deposit page before trying option '%s': %s",
+                    "Reload failed before option '%s': %s",
                     option.label or option.value or f"option-{idx + 1}",
                     exc,
                 )
                 break
-        detection = _find_deposit_form_with_payments(page, logger)
+            detection = _find_deposit_form_with_payments(page, logger)
         if not detection:
-            logger.debug("Deposit form disappeared when processing option %d", idx + 1)
+            logger.debug("Deposit form still missing after reload (option %d)", idx + 1)
             break
         form, select, _ = detection
         if not _select_payment_option(select, option, logger):
