@@ -12,6 +12,7 @@ from playwright.sync_api import ElementHandle
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from .archival_crawler import _normalize_url, _origin_host, extract_links
 from .automation import click_by_text, submit_form_element
 from .browser import BrowserConfig, BrowserSession
 from .io_utils import RunPaths, relative_artifact_path, sanitize_filename, save_text
@@ -217,8 +218,19 @@ def explore_interesting_pages(
     indicators: List[Indicator] = []
     page = browser.page
     steps = 0
+    visited_urls: Set[str] = set()
+
+    def _mark_visited(url: str) -> str:
+        normalized = _normalize_url(url) or url
+        visited_urls.add(normalized)
+        return normalized
 
     def process_current_view(label: str) -> None:
+        normalized = _normalize_url(page.url) or page.url
+        if normalized in visited_urls:
+            logger.debug("Skipping capture for already visited URL %s", normalized)
+            return
+        _mark_visited(normalized)
         scan_artifacts, scan_indicators = scan_current_view(
             browser, run_paths, label, logger
         )
@@ -252,6 +264,7 @@ def explore_interesting_pages(
             label = f"{prefix}_{steps:02d}_{sanitize_filename(keyword)}"
             process_current_view(label)
 
+    _mark_visited(page.url)
     run_keywords(FUNDING_KEYWORDS, "step")
 
     if steps < max_steps and not is_deposit_context(page):
@@ -261,6 +274,52 @@ def explore_interesting_pages(
         if click_menu(page, logger=logger):
             page.wait_for_timeout(800)
             run_keywords(FUNDING_KEYWORDS, "step")
+
+    def follow_deposit_links(max_links: int) -> int:
+        consumed = 0
+        origin_host = _origin_host(page.url)
+        try:
+            links = extract_links(
+                page,
+                page.url,
+                same_origin_only=True,
+                origin_host=origin_host,
+                logger=logger,
+                avoid_auth_links=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("extract_links failed during deep-dive deposit scan: %s", exc)
+            return consumed
+        deposit_links: List[str] = []
+        for link in links:
+            normalized = _normalize_url(link) or link
+            lowered = normalized.lower()
+            if any(hint in lowered for hint in DEPOSIT_CONTEXT_HINTS):
+                deposit_links.append(link)
+        logger.debug(
+            "Identified %d deposit-like links on current page (candidates: %s)",
+            len(deposit_links),
+            deposit_links,
+        )
+        for idx, link in enumerate(deposit_links):
+            if consumed >= max_links:
+                break
+            normalized = _normalize_url(link) or link
+            if normalized in visited_urls:
+                continue
+            try:
+                page.goto(link, wait_until="networkidle")
+            except PlaywrightError as exc:
+                logger.debug("Navigation to deposit link failed: %s", exc)
+                continue
+            consumed += 1
+            label = f"link_{consumed:02d}_{sanitize_filename(link)}"
+            process_current_view(label)
+        return consumed
+
+    if steps < max_steps:
+        remaining = max_steps - steps
+        steps += follow_deposit_links(remaining)
 
     if indicators:
         logger.info("Detected %d indicators during exploration", len(indicators))
