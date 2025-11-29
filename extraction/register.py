@@ -9,7 +9,8 @@ from typing import Dict, List, Optional, Tuple
 from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from .automation import KEYWORD_CLICKS, click_keywords, submit_form_element
+from .auth_navigation import NavigationConfig, discover_form_with_navigation
+from .automation import KEYWORD_CLICKS, submit_form_element
 from .browser import BrowserConfig, BrowserSession
 from .field_classifier import FieldClassification
 from .field_errors import FieldError, extract_field_errors, interpret_field_error
@@ -31,6 +32,29 @@ from .value_assignment import (
 )
 
 DEFAULT_PASSWORD = "AntiScam!234"
+REG_NAVIGATION = NavigationConfig(
+    primary_keywords=(
+        "register",
+        "sign up",
+        "signup",
+        "create account",
+        "open account",
+        "get started",
+    ),
+    secondary_keywords=(
+        "join",
+        "start now",
+        "start trading",
+        "log in",
+        "login",
+        "sign in",
+    ),
+    max_depth=2,
+    max_candidates=8,
+    max_visits=8,
+    fallback_keywords=KEYWORD_CLICKS,
+    fallback_clicks=4,
+)
 
 
 @dataclass(slots=True)
@@ -163,17 +187,17 @@ def run_registration(inputs: RegisterInputs) -> Dict[str, object]:
 def _discover_registration_form(
     page: Page, logger: logging.Logger
 ) -> Tuple[Optional[FormDescriptor], List[FieldClassification]]:
-    form_descriptor, classifications = find_best_registration_form(page, logger)
-    if form_descriptor and not _is_weak_registration_candidate(
-        form_descriptor, classifications
-    ):
-        return form_descriptor, classifications
-
-    logger.debug(
-        "Registration form not detected or appears weak; clicking navigation heuristics"
+    return discover_form_with_navigation(
+        page,
+        detect_form=lambda current_page: find_best_registration_form(
+            current_page, logger
+        ),
+        is_valid_form=lambda descriptor, classes: not _is_weak_registration_candidate(
+            descriptor, classes
+        ),
+        config=REG_NAVIGATION,
+        logger=logger,
     )
-    click_keywords(page, KEYWORD_CLICKS, max_clicks=4, logger=logger)
-    return find_best_registration_form(page, logger)
 
 
 def _log_field_classifications(

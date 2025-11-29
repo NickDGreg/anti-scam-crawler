@@ -11,11 +11,11 @@ from urllib.parse import urlparse
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from .auth_navigation import NavigationConfig, discover_form_with_navigation
 from .automation import (
     AUTH_KEYWORDS,
     EMAIL_SELECTORS,
     SECRET_SELECTORS,
-    click_by_text,
     detect_error_banner,
     fill_form_fields,
     find_form,
@@ -43,22 +43,25 @@ def get_login_form(page, *, logger: logging.Logger | None = None):
 
 
 def navigate_to_login(page, *, logger: logging.Logger, max_clicks: int = 5) -> None:
-    clicks = 0
-    for keyword in AUTH_KEYWORDS:
-        if clicks >= max_clicks:
-            break
-        if get_login_form(page, logger=logger):
-            logger.debug("Login form detected during auth navigation; stopping")
-            return
-        logger.debug("Attempting to reach login via keyword '%s'", keyword)
-        clicked = click_by_text(page, keyword, logger=logger)
-        if clicked:
-            clicks += 1
-            page.wait_for_timeout(800)
-            if get_login_form(page, logger=logger):
-                logger.debug("Login form detected after clicking '%s'", keyword)
-                return
-    logger.debug("Auth navigation finished without detecting login form")
+    config = NavigationConfig(
+        primary_keywords=AUTH_KEYWORDS,
+        secondary_keywords=("register", "sign up", "signup", "create account"),
+        max_depth=2,
+        max_candidates=max_clicks,
+        max_visits=max(6, max_clicks + 2),
+        fallback_keywords=AUTH_KEYWORDS,
+        fallback_clicks=max_clicks,
+    )
+    discover_form_with_navigation(
+        page,
+        detect_form=lambda current_page: (
+            get_login_form(current_page, logger=logger),
+            None,
+        ),
+        is_valid_form=lambda form, _: form is not None,
+        config=config,
+        logger=logger,
+    )
 
 
 def infer_login_success(
