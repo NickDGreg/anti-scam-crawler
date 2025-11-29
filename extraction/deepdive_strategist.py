@@ -12,7 +12,7 @@ from playwright.sync_api import ElementHandle
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from .automation import click_by_text
+from .automation import click_by_text, submit_form_element
 from .browser import BrowserConfig, BrowserSession
 from .io_utils import RunPaths, relative_artifact_path, sanitize_filename, save_text
 from .login_flow import (
@@ -168,6 +168,7 @@ def run_targeted_probe(inputs: ProbeInputs) -> ProbeResult:
                 email=inputs.email,
                 secret=inputs.secret,
                 logger=logger,
+                run_paths=run_paths,
             )
             final_url = page.url
 
@@ -646,6 +647,226 @@ def _dismiss_modal(page, logger: logging.Logger) -> None:
             break
 
 
+@dataclass(slots=True)
+class PaymentOption:
+    value: str
+    label: str
+
+
+def _deposit_form_candidate(form: ElementHandle, logger: logging.Logger) -> bool:
+    try:
+        method = (form.get_attribute("method") or "").lower()
+    except PlaywrightError:
+        method = ""
+    if method and method != "post":
+        return False
+    try:
+        name_and_id = (
+            (form.get_attribute("name") or "") + " " + (form.get_attribute("id") or "")
+        ).lower()
+    except PlaywrightError:
+        name_and_id = ""
+    try:
+        deposit_input = form.query_selector("input[name='a' i][value*='deposit' i]")
+        token_input = form.query_selector(
+            "input[name='form_id' i], input[name*='token' i], input[name*='csrf' i]"
+        )
+    except PlaywrightError:
+        deposit_input = None
+        token_input = None
+    return bool(deposit_input or token_input or re.search("spend|deposit", name_and_id))
+
+
+def _find_payment_select(
+    form: ElementHandle, logger: logging.Logger
+) -> Optional[ElementHandle]:
+    for selector in (
+        "select[name='type' i]",
+        "select[name*='method' i]",
+        "select[name*='payment' i]",
+    ):
+        try:
+            select = form.query_selector(selector)
+        except PlaywrightError as exc:
+            logger.debug("Payment select lookup failed for '%s': %s", selector, exc)
+            continue
+        if select:
+            return select
+    return None
+
+
+def _extract_payment_options(
+    select: ElementHandle, logger: logging.Logger
+) -> List[PaymentOption]:
+    try:
+        option_handles = select.query_selector_all("option")
+    except PlaywrightError as exc:
+        logger.debug("Unable to enumerate payment options: %s", exc)
+        return []
+    options: List[PaymentOption] = []
+    seen: Set[Tuple[str, str]] = set()
+    for handle in option_handles:
+        try:
+            value = (handle.get_attribute("value") or "").strip()
+        except PlaywrightError:
+            value = ""
+        try:
+            label = (handle.inner_text() or handle.text_content() or "").strip()
+        except PlaywrightError:
+            label = ""
+        label = label or value
+        if not (value or label):
+            continue
+        key = (value.lower(), label.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        options.append(PaymentOption(value=value, label=label))
+    return options
+
+
+def _find_deposit_form_with_payments(
+    page, logger: logging.Logger
+) -> Optional[Tuple[ElementHandle, ElementHandle, List[PaymentOption]]]:
+    try:
+        forms = page.query_selector_all("form")
+    except PlaywrightError as exc:
+        logger.debug("Unable to enumerate forms on deposit page: %s", exc)
+        return None
+    for form in forms:
+        if not _deposit_form_candidate(form, logger):
+            continue
+        select = _find_payment_select(form, logger)
+        if not select:
+            continue
+        options = _extract_payment_options(select, logger)
+        if options:
+            return form, select, options
+    logger.debug("No deposit form with payment selector detected on %s", page.url)
+    return None
+
+
+def _select_payment_option(
+    select: ElementHandle, option: PaymentOption, logger: logging.Logger
+) -> bool:
+    target = option.value or option.label
+    if not target:
+        return False
+    try:
+        select.select_option(value=target)
+        return True
+    except PlaywrightError as exc:
+        logger.debug("select_option failed for '%s': %s", target, exc)
+    try:
+        success = bool(
+            select.evaluate(
+                """
+                (el, target) => {
+                    const match = [...el.options].find(
+                        opt =>
+                            (target.value && opt.value === target.value) ||
+                            (target.label && opt.textContent.trim() === target.label)
+                    );
+                    if (!match) {
+                        return false;
+                    }
+                    el.value = match.value;
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                }
+                """,
+                {"value": option.value, "label": option.label},
+            )
+        )
+        return success
+    except PlaywrightError as exc:
+        logger.debug("Fallback selection failed for '%s': %s", target, exc)
+    return False
+
+
+def _submit_deposit_form(page, form: ElementHandle, logger: logging.Logger) -> None:
+    try:
+        with page.expect_navigation(wait_until="networkidle", timeout=12000):
+            submit_form_element(form, logger=logger)
+        return
+    except PlaywrightTimeoutError:
+        logger.debug("Deposit form submission did not trigger navigation in time")
+    except PlaywrightError as exc:
+        logger.warning("Failed to submit deposit form: %s", exc)
+        return
+    try:
+        page.wait_for_load_state("networkidle", timeout=6000)
+    except PlaywrightTimeoutError:
+        logger.debug("Network idle wait after submit timed out; continuing")
+
+
+def explore_deposit_form(
+    browser: BrowserSession,
+    run_paths: RunPaths,
+    base_label: str,
+    logger: logging.Logger,
+    max_payment_options: int = 3,
+) -> Tuple[List[str], List[Indicator]]:
+    page = browser.page
+    detection = _find_deposit_form_with_payments(page, logger)
+    if not detection:
+        return [], []
+    _, _, options = detection
+    payment_options = options[:max_payment_options]
+    if not payment_options:
+        logger.debug("Deposit form detected but no selectable payment options found")
+        return [], []
+
+    artifacts: List[str] = []
+    indicators: List[Indicator] = []
+    deposit_url = page.url
+    logger.info(
+        "Exploring deposit form at %s for %d payment methods (max %d)",
+        deposit_url,
+        len(payment_options),
+        max_payment_options,
+    )
+    for idx, option in enumerate(payment_options):
+        if page.url != deposit_url:
+            try:
+                page.goto(deposit_url, wait_until="networkidle")
+            except PlaywrightError as exc:
+                logger.warning(
+                    "Failed to return to deposit page before trying option '%s': %s",
+                    option.label or option.value or f"option-{idx + 1}",
+                    exc,
+                )
+                break
+        detection = _find_deposit_form_with_payments(page, logger)
+        if not detection:
+            logger.debug("Deposit form disappeared when processing option %d", idx + 1)
+            break
+        form, select, _ = detection
+        if not _select_payment_option(select, option, logger):
+            logger.debug("Unable to select payment option '%s'; skipping", option.label)
+            continue
+        _submit_deposit_form(page, form, logger)
+        try:
+            page.wait_for_timeout(800)
+        except PlaywrightError:
+            pass
+        label = (
+            f"{base_label}_deposit_{idx + 1:02d}_"
+            f"{sanitize_filename(option.label or option.value or 'option')}"
+        )
+        view_artifacts, view_indicators = capture_page_state(
+            browser, run_paths, label, logger
+        )
+        artifacts.extend(view_artifacts)
+        indicators.extend(view_indicators)
+    if page.url != deposit_url:
+        try:
+            page.goto(deposit_url, wait_until="load")
+        except PlaywrightError:
+            logger.debug("Unable to return to deposit page after exploration")
+    return artifacts, indicators
+
+
 def click_deposit_methods(
     browser: BrowserSession,
     run_paths: RunPaths,
@@ -727,6 +948,11 @@ def scan_current_view(
         )
     try:
         if is_deposit_context(browser.page):
+            form_artifacts, form_indicators = explore_deposit_form(
+                browser, run_paths, label, logger
+            )
+            artifacts.extend(form_artifacts)
+            indicators.extend(form_indicators)
             method_artifacts, method_indicators = click_deposit_methods(
                 browser, run_paths, label, logger
             )
@@ -734,7 +960,7 @@ def scan_current_view(
             indicators.extend(method_indicators)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "Deposit-method exploration failed for '%s'; continuing without it: %s",
+            "Deposit exploration failed for '%s'; continuing without it: %s",
             label,
             exc,
         )

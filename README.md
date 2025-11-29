@@ -20,31 +20,37 @@ No Docker/LXD artefacts are included; run the tool directly on the host/containe
 
 ## Usage
 
-Run via `python -m anti_scam <command> [options]`.
+All commands can be launched with `python -m extraction <command> ...`. If you are using
+`uv`, the recommended pattern is `uv run python -m extraction <command> ...` so that your
+virtual environment is hydrated automatically.
 
 ### Register
 
 ```bash
-python -m anti_scam register \
+uv run python -m extraction register \
   --url https://example.com \
   --email user@example.com \
   --password Sup3rSafe!
 ```
 
-### Extract
+### Extract (Deep-Dive Strategist)
 
 ```bash
-python -m anti_scam extract \
+uv run python -m extraction extract \
   --url https://example.com/login \
   --email user@example.com \
   --secret Sup3rSafe! \
-  --max-steps 5
+  --max-steps 5 \
+  --verbose
 ```
 
+This runs the legacy deep-dive strategist: it logs in with the supplied credentials,
+explores deposit pages (including the new deposit-form submission flow), and writes all
+artifacts to `data/<run_id>/extract/`.
 ### Map (ArchivalCrawler)
 
 ```bash
-python -m anti_scam map \
+uv run python -m extraction map \
   --url https://example.com/dashboard \
   --email user@example.com \
   --secret Sup3rSafe! \
@@ -59,7 +65,7 @@ Use `--allow-external` if you want to follow outbound links; omit it to stay on 
 ### Scan Archive (offline regex extraction)
 
 ```bash
-python -m anti_scam scan-archive \
+uv run python -m extraction scan-archive \
   --archive-dir data/20251128-130108-7f5b/map \
   --verbose
 ```
@@ -69,7 +75,7 @@ This reads `mapping.json` in the specified directory, scans each archived HTML w
 ### Debug Login
 
 ```bash
-python -m anti_scam debug-login --url https://example.com/login
+uv run python -m extraction debug-login --url https://example.com/login
 ```
 
 Opens Chromium with Playwright’s inspector enabled so you can manually explore or record selectors before running automation.
@@ -81,3 +87,6 @@ Opens Chromium with Playwright’s inspector enabled so you can manually explore
 - Provide `--run-id` to reuse a directory; otherwise one is generated (`YYYYMMDD-HHMMSS-xxxx`).
 
 Logging writes both to stdout and to `data/<run_id>/anti_scam.log`.
+
+#### Notes
+A KPI for versions of this would be how many sites we visit which we successfully extract crypto addresses from. And intermediate steps of register, log in and so on.

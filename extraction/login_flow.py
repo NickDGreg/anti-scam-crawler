@@ -21,6 +21,7 @@ from .automation import (
     find_form,
     submit_form,
 )
+from .io_utils import RunPaths, relative_artifact_path, save_text
 
 LOGGED_IN_HINTS = ("logout", "log out", "dashboard", "my account", "profile", "cabinet")
 LOGIN_PATH_HINTS = ("login", "signin", "sign-in", "sign_in")
@@ -168,6 +169,33 @@ def login_form_still_present(page, logger: logging.Logger | None = None) -> bool
     return form is not None
 
 
+def _capture_login_debug(
+    page,
+    run_paths: RunPaths | None,
+    label: str,
+    logger: logging.Logger,
+) -> str | None:
+    if not run_paths:
+        return None
+    artifact: str | None = None
+    try:
+        shot_path = run_paths.build_path(f"{label}.png")
+        page.screenshot(path=str(shot_path), full_page=True)
+        artifact = relative_artifact_path(shot_path)
+        logger.debug("Captured login debug screenshot at %s", artifact)
+    except PlaywrightError as exc:
+        logger.debug("Failed to capture login debug screenshot: %s", exc)
+    try:
+        html_path = run_paths.build_path(f"{label}.html")
+        save_text(html_path, page.content())
+        logger.debug(
+            "Captured login debug html at %s", relative_artifact_path(html_path)
+        )
+    except PlaywrightError as exc:
+        logger.debug("Failed to capture login debug html: %s", exc)
+    return artifact
+
+
 def is_login_path(path: str) -> bool:
     normalized = (path or "").lower()
     return any(hint in normalized for hint in LOGIN_PATH_HINTS)
@@ -180,6 +208,7 @@ def perform_login(
     secret: str,
     logger: logging.Logger,
     max_attempts: int = 2,
+    run_paths: RunPaths | None = None,
 ) -> LoginResult:
     notes: List[str] = []
     form = get_login_form(page, logger=logger)
@@ -191,6 +220,9 @@ def perform_login(
     if not form:
         notes.append("Could not locate a login form with email + secret fields.")
         logger.warning("Login form still missing after heuristics")
+        artifact = _capture_login_debug(page, run_paths, "login_missing_form", logger)
+        if artifact:
+            notes.append(f"login_missing_form_screenshot={artifact}")
         return LoginResult(success=False, status="no_form_found", notes=notes)
 
     logger.debug("Login form located, attempting authentication")
@@ -207,6 +239,9 @@ def perform_login(
         else:
             notes.append("Login attempts did not transition away from the login page.")
         logger.warning("Login failed after retries")
+        artifact = _capture_login_debug(page, run_paths, "login_failed", logger)
+        if artifact:
+            notes.append(f"login_failed_screenshot={artifact}")
         return LoginResult(success=False, status="login_failed", notes=notes)
 
     logger.debug("Login succeeded")

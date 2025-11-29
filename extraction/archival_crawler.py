@@ -262,6 +262,7 @@ def run_mapping(inputs: MappingInputs) -> MappingResult:
                 email=inputs.email,
                 secret=inputs.secret,
                 logger=logger,
+                run_paths=inputs.run_paths,
             )
             start_url = _normalize_url(page.url) or page.url
             origin_host = _origin_host(start_url)
