@@ -113,19 +113,28 @@ def _normalize_url(candidate: str) -> Optional[str]:
     return urlunparse(normalized)
 
 
+def _path_and_query(url: str) -> Tuple[str, str]:
+    parsed = urlparse(url)
+    path = (parsed.path or "").lower()
+    query = (parsed.query or "").lower()
+    return path, query
+
+
+def _contains_hint(url: str, hints: Tuple[str, ...]) -> bool:
+    path, query = _path_and_query(url)
+    return any(hint and (hint in path or hint in query) for hint in hints)
+
+
 def _looks_like_login(url: str) -> bool:
-    path = urlparse(url).path.lower()
-    return any(hint in path for hint in LOGIN_PATH_HINTS)
+    return _contains_hint(url, LOGIN_PATH_HINTS)
 
 
 def _looks_like_logout(url: str) -> bool:
-    path = urlparse(url).path.lower()
-    return any(hint in path for hint in LOGOUT_PATH_HINTS)
+    return _contains_hint(url, LOGOUT_PATH_HINTS)
 
 
 def _looks_like_register(url: str) -> bool:
-    path = urlparse(url).path.lower()
-    return any(hint in path for hint in REGISTER_PATH_HINTS)
+    return _contains_hint(url, REGISTER_PATH_HINTS)
 
 
 def _should_skip_link(url: str, *, same_origin_only: bool, origin_host: str) -> bool:
