@@ -14,6 +14,12 @@ EMAIL_SELECTORS = [
     "input[type='email']",
     "input[name*='email' i]",
     "input[placeholder*='email' i]",
+    "input[name*='user' i]",
+    "input[name*='username' i]",
+    "input[name*='login' i]",
+    "input[placeholder*='username' i]",
+    "input[placeholder*='user name' i]",
+    "input[placeholder*='login' i]",
 ]
 PASSWORD_SELECTORS = [
     "input[type='password']",
