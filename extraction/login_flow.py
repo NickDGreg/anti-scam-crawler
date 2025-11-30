@@ -133,7 +133,7 @@ def attempt_login_with_retries(
         logger.debug("Submitting login form (attempt %d)", attempt)
         submit_form(form, logger=logger)
         try:
-            page.wait_for_load_state("networkidle", timeout=10000)
+            page.wait_for_load_state("load", timeout=20000)
         except PlaywrightTimeoutError:
             logger.debug(
                 "Login attempt %d did not trigger navigation within timeout", attempt

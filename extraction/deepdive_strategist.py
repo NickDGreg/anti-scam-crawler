@@ -256,7 +256,7 @@ def explore_interesting_pages(
                 continue
             steps += 1
             try:
-                page.wait_for_load_state("networkidle", timeout=7000)
+                page.wait_for_load_state("load", timeout=7000)
             except PlaywrightTimeoutError:
                 logger.debug(
                     "Navigation after clicking '%s' did not complete in time", keyword
@@ -308,7 +308,7 @@ def explore_interesting_pages(
             if normalized in visited_urls:
                 continue
             try:
-                page.goto(link, wait_until="networkidle")
+                page.goto(link, wait_until="load")
             except PlaywrightError as exc:
                 logger.debug("Navigation to deposit link failed: %s", exc)
                 continue
@@ -845,7 +845,7 @@ def _select_payment_option(
 
 def _submit_deposit_form(page, form: ElementHandle, logger: logging.Logger) -> None:
     try:
-        with page.expect_navigation(wait_until="networkidle", timeout=12000):
+        with page.expect_navigation(wait_until="load", timeout=12000):
             submit_form_element(form, logger=logger)
         return
     except PlaywrightTimeoutError:
@@ -854,7 +854,7 @@ def _submit_deposit_form(page, form: ElementHandle, logger: logging.Logger) -> N
         logger.warning("Failed to submit deposit form: %s", exc)
         return
     try:
-        page.wait_for_load_state("networkidle", timeout=6000)
+        page.wait_for_load_state("load", timeout=6000)
     except PlaywrightTimeoutError:
         logger.debug("Network idle wait after submit timed out; continuing")
 
@@ -887,7 +887,7 @@ def explore_deposit_form(
     )
     for idx, option in enumerate(payment_options):
         try:
-            page.goto(deposit_url, wait_until="networkidle")
+            page.goto(deposit_url, wait_until="load")
         except PlaywrightError as exc:
             logger.warning(
                 "Failed to load deposit page before option '%s': %s",
@@ -903,7 +903,7 @@ def explore_deposit_form(
                 idx + 1,
             )
             try:
-                page.goto(deposit_url, wait_until="networkidle")
+                page.goto(deposit_url, wait_until="load")
             except PlaywrightError as exc:
                 logger.warning(
                     "Reload failed before option '%s': %s",

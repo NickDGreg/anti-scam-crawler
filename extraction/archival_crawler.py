@@ -253,7 +253,7 @@ def run_mapping(inputs: MappingInputs) -> MappingResult:
 
     try:
         with BrowserSession(BrowserConfig()) as browser:
-            page = browser.goto(start_url, wait_until="networkidle")
+            page = browser.goto(start_url, wait_until="load")
             logger.debug("Loaded entry page %s", page.url)
 
             logger.debug("Attempting authentication for archival crawl")
@@ -297,7 +297,7 @@ def run_mapping(inputs: MappingInputs) -> MappingResult:
 
                 try:
                     response = page.goto(
-                        normalized_target, wait_until="networkidle", timeout=10000
+                        normalized_target, wait_until="load", timeout=20000
                     )
                 except PlaywrightTimeoutError as exc:
                     logger.warning(

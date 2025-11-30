@@ -85,7 +85,7 @@ def discover_form_with_navigation(
 
         if page.url != target_url:
             try:
-                page.goto(target_url, wait_until="networkidle", timeout=8000)
+                page.goto(target_url, wait_until="load", timeout=8000)
             except PlaywrightTimeoutError as exc:
                 logger.debug("Navigation to %s timed out: %s", target_url, exc)
                 continue

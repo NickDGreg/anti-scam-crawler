@@ -101,7 +101,7 @@ def run_registration(inputs: RegisterInputs) -> Dict[str, object]:
     try:
         logger.debug("Starting registration against %s as %s", inputs.url, inputs.email)
         with BrowserSession(BrowserConfig()) as browser:
-            page = browser.goto(inputs.url, wait_until="networkidle")
+            page = browser.goto(inputs.url, wait_until="load")
             final_url = page.url
             logger.debug("Loaded landing page %s", final_url)
             landing_shot = browser.screenshot(run_paths.build_path("00_landing.png"))
@@ -353,7 +353,7 @@ def _perform_attempt(
     pre_submit_url = page.url
     submit_form_element(form_descriptor.element, logger=logger)
     try:
-        page.wait_for_load_state("networkidle", timeout=8000)
+        page.wait_for_load_state("load", timeout=8000)
     except PlaywrightTimeoutError as exc:
         logger.debug("Submission wait timed out: %s", exc)
     final_url = page.url
