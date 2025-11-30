@@ -535,10 +535,69 @@ def reveal_hidden_sections(
     indicators: List[Indicator] = []
     page = browser.page
     clicks = 0
+
+    # Prefer non-navigational interactions (buttons, anchors without real hrefs)
+    # to avoid leaving the deposit page before deeper exploration.
+    def _is_navigation_link(handle: ElementHandle) -> bool:
+        try:
+            tag = (handle.evaluate("el => el.tagName || ''") or "").lower()
+        except PlaywrightError:
+            tag = ""
+        if tag != "a":
+            return False
+        try:
+            href = (handle.get_attribute("href") or "").strip().lower()
+        except PlaywrightError:
+            href = ""
+        if not href:
+            return False
+        if href in ("#", "javascript:void(0)", "javascript:void(0);", "javascript:;"):
+            return False
+        if href.startswith("#"):
+            return False
+        return True
+
+    def _click_reveal_action(keyword: str) -> bool:
+        pattern = re.compile(re.escape(keyword), re.IGNORECASE)
+        try:
+            button_locator = page.get_by_role("button", name=pattern)
+            if button_locator.count() > 0:
+                try:
+                    button_locator.first.click()
+                    logger.debug("Clicked button with text '%s'", keyword)
+                    return True
+                except PlaywrightError as exc:
+                    logger.debug("Button click failed for '%s': %s", keyword, exc)
+        except PlaywrightError:
+            pass
+        try:
+            text_locator = page.get_by_text(pattern)
+            matches = min(text_locator.count(), 5)
+        except PlaywrightError as exc:
+            logger.debug("Reveal locator lookup failed for '%s': %s", keyword, exc)
+            return False
+        for idx in range(matches):
+            try:
+                handle = text_locator.nth(idx).element_handle()
+            except PlaywrightError as exc:
+                logger.debug(
+                    "Failed to get element handle for '%s' occurrence %d: %s",
+                    keyword,
+                    idx + 1,
+                    exc,
+                )
+                continue
+            if not handle or _is_navigation_link(handle):
+                continue
+            if _safe_click_handle(handle, logger):
+                logger.debug("Clicked reveal element with text '%s'", keyword)
+                return True
+        return False
+
     for keyword in REVEAL_KEYWORDS:
         if clicks >= max_clicks:
             break
-        clicked = click_by_text(page, keyword, logger=logger)
+        clicked = _click_reveal_action(keyword)
         if not clicked:
             continue
         clicks += 1
@@ -710,6 +769,7 @@ def _dismiss_modal(page, logger: logging.Logger) -> None:
 class PaymentOption:
     value: str
     label: str
+    handle: Optional[ElementHandle] = None
 
 
 def _deposit_form_candidate(form: ElementHandle, logger: logging.Logger) -> bool:
@@ -784,9 +844,101 @@ def _extract_payment_options(
     return options
 
 
+def _extract_clickable_payment_options(
+    form: ElementHandle, logger: logging.Logger
+) -> List[PaymentOption]:
+    selectors = (
+        "[data-method]",
+        "[data-payment]",
+        "[data-pay]",
+        "[data-gateway]",
+        "[data-processor]",
+        "[data-coin]",
+    )
+    handles: List[ElementHandle] = []
+    seen_handles: Set[int] = set()
+
+    def _add_handles(candidate_list: List[ElementHandle]) -> None:
+        for handle in candidate_list:
+            if handle and id(handle) not in seen_handles:
+                seen_handles.add(id(handle))
+                handles.append(handle)
+
+    for selector in selectors:
+        try:
+            matches = form.query_selector_all(selector)
+        except PlaywrightError as exc:
+            logger.debug("Clickable payment lookup failed for '%s': %s", selector, exc)
+            matches = []
+        _add_handles(matches)
+    try:
+        toggle_inputs = form.query_selector_all(
+            "input[type='radio' i], input[type='checkbox' i]"
+        )
+    except PlaywrightError as exc:
+        logger.debug("Toggle payment option lookup failed: %s", exc)
+        toggle_inputs = []
+    for toggle in toggle_inputs:
+        try:
+            name_and_id = (
+                (toggle.get_attribute("name") or "")
+                + " "
+                + (toggle.get_attribute("id") or "")
+            ).lower()
+            value_attr = (toggle.get_attribute("value") or "").lower()
+        except PlaywrightError:
+            name_and_id = ""
+            value_attr = ""
+        if not re.search("method|payment|pay|gateway|channel|crypto|coin", name_and_id):
+            if not re.search(
+                "method|payment|pay|gateway|channel|crypto|coin", value_attr
+            ):
+                continue
+        if toggle and id(toggle) not in seen_handles:
+            seen_handles.add(id(toggle))
+            handles.append(toggle)
+
+    options: List[PaymentOption] = []
+    seen: Set[Tuple[str, str]] = set()
+    for handle in handles:
+        try:
+            data_value = (
+                handle.get_attribute("data-method")
+                or handle.get_attribute("data-payment")
+                or handle.get_attribute("data-pay")
+                or handle.get_attribute("data-gateway")
+                or handle.get_attribute("data-processor")
+                or handle.get_attribute("data-coin")
+                or handle.get_attribute("value")
+                or ""
+            ).strip()
+        except PlaywrightError:
+            data_value = ""
+        try:
+            label_text = (handle.inner_text() or handle.text_content() or "").strip()
+        except PlaywrightError:
+            label_text = ""
+        if not label_text:
+            try:
+                container = _locate_container_from_handle(handle, logger)
+                label_text = (container.inner_text() or "").strip()
+            except PlaywrightError:
+                label_text = ""
+        value = data_value or label_text
+        label = label_text or data_value
+        if not (value or label):
+            continue
+        key = (value.lower(), label.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        options.append(PaymentOption(value=value, label=label, handle=handle))
+    return options
+
+
 def _find_deposit_form_with_payments(
     page, logger: logging.Logger
-) -> Optional[Tuple[ElementHandle, ElementHandle, List[PaymentOption]]]:
+) -> Optional[Tuple[ElementHandle, Optional[ElementHandle], List[PaymentOption]]]:
     try:
         forms = page.query_selector_all("form")
     except PlaywrightError as exc:
@@ -796,18 +948,30 @@ def _find_deposit_form_with_payments(
         if not _deposit_form_candidate(form, logger):
             continue
         select = _find_payment_select(form, logger)
-        if not select:
-            continue
-        options = _extract_payment_options(select, logger)
-        if options:
-            return form, select, options
-    logger.debug("No deposit form with payment selector detected on %s", page.url)
+        if select:
+            options = _extract_payment_options(select, logger)
+            if options:
+                return form, select, options
+        clickable_options = _extract_clickable_payment_options(form, logger)
+        if clickable_options:
+            return form, None, clickable_options
+    logger.debug("No deposit form with payment options detected on %s", page.url)
     return None
 
 
 def _select_payment_option(
-    select: ElementHandle, option: PaymentOption, logger: logging.Logger
+    select: Optional[ElementHandle], option: PaymentOption, logger: logging.Logger
 ) -> bool:
+    if option.handle:
+        if _safe_click_handle(option.handle, logger):
+            try:
+                option.handle.page.wait_for_timeout(300)
+            except PlaywrightError:
+                pass
+            return True
+        return False
+    if not select:
+        return False
     target = option.value or option.label
     if not target:
         return False
@@ -841,6 +1005,95 @@ def _select_payment_option(
     except PlaywrightError as exc:
         logger.debug("Fallback selection failed for '%s': %s", target, exc)
     return False
+
+
+def _fill_deposit_amount(
+    form: ElementHandle, logger: logging.Logger, amount: str = "1000"
+) -> bool:
+    selectors = (
+        "input[name*='amount' i]",
+        "input[id*='amount' i]",
+        "input[name*='sum' i]",
+        "input[type='number']",
+    )
+    for selector in selectors:
+        try:
+            field = form.query_selector(selector)
+        except PlaywrightError as exc:
+            logger.debug("Amount input lookup failed for '%s': %s", selector, exc)
+            continue
+        if not field:
+            continue
+        try:
+            field_type = (field.get_attribute("type") or "").lower()
+        except PlaywrightError:
+            field_type = ""
+        if field_type == "hidden":
+            continue
+        try:
+            field.fill(amount)
+            return True
+        except PlaywrightError as exc:
+            logger.debug("Unable to fill amount via '%s': %s", selector, exc)
+    logger.debug("No amount input filled on deposit form; continuing without it")
+    return False
+
+
+def _ensure_payment_hidden_value(
+    form: ElementHandle, option: PaymentOption, logger: logging.Logger
+) -> None:
+    try:
+        hidden = form.query_selector(
+            "input[type='hidden' i][name*='payment' i], "
+            "input[type='hidden' i][id*='payment' i], "
+            "input[type='hidden' i][name*='method' i], "
+            "input[type='hidden' i][id*='method' i]"
+        )
+    except PlaywrightError as exc:
+        logger.debug("Hidden payment input lookup failed: %s", exc)
+        return
+    if not hidden:
+        return
+    try:
+        current_value = hidden.get_attribute("value") or ""
+    except PlaywrightError:
+        current_value = ""
+    if current_value:
+        return
+    target_value = option.value or option.label
+    if not target_value:
+        return
+    try:
+        hidden.fill(target_value)
+        return
+    except PlaywrightError:
+        pass
+    try:
+        hidden.evaluate(
+            "(el, value) => { el.value = value; el.dispatchEvent(new Event('input', { bubbles: true })); }",
+            target_value,
+        )
+    except PlaywrightError as exc:
+        logger.debug("Unable to set hidden payment input: %s", exc)
+
+
+def _match_payment_option(
+    target: PaymentOption, options: List[PaymentOption]
+) -> Optional[PaymentOption]:
+    desired = (
+        (target.value or "").strip().lower(),
+        (target.label or "").strip().lower(),
+    )
+    for option in options:
+        candidate = (
+            (option.value or "").strip().lower(),
+            (option.label or "").strip().lower(),
+        )
+        if candidate == desired:
+            return option
+    if options:
+        return options[0]
+    return None
 
 
 def _submit_deposit_form(page, form: ElementHandle, logger: logging.Logger) -> None:
@@ -915,10 +1168,20 @@ def explore_deposit_form(
         if not detection:
             logger.debug("Deposit form still missing after reload (option %d)", idx + 1)
             break
-        form, select, _ = detection
-        if not _select_payment_option(select, option, logger):
-            logger.debug("Unable to select payment option '%s'; skipping", option.label)
+        form, select, current_options = detection
+        target_option = _match_payment_option(option, current_options)
+        if not target_option:
+            logger.debug(
+                "Unable to find payment option to match '%s'; skipping", option.label
+            )
             continue
+        _fill_deposit_amount(form, logger)
+        if not _select_payment_option(select, target_option, logger):
+            logger.debug(
+                "Unable to select payment option '%s'; skipping", target_option.label
+            )
+            continue
+        _ensure_payment_hidden_value(form, target_option, logger)
         _submit_deposit_form(page, form, logger)
         try:
             page.wait_for_timeout(800)
@@ -926,7 +1189,7 @@ def explore_deposit_form(
             pass
         label = (
             f"{base_label}_deposit_{idx + 1:02d}_"
-            f"{sanitize_filename(option.label or option.value or 'option')}"
+            f"{sanitize_filename(target_option.label or target_option.value or 'option')}"
         )
         view_artifacts, view_indicators = capture_page_state(
             browser, run_paths, label, logger
@@ -956,14 +1219,14 @@ def click_deposit_methods(
     for keyword in DEPOSIT_METHOD_KEYWORDS:
         if clicks >= max_clicks:
             break
-        logger.debug("Searching for deposit method keyword '%s'", keyword)
+        # logger.debug("Searching for deposit method keyword '%s'", keyword)
         for occurrence in range(2):
             if clicks >= max_clicks:
                 break
             container = _find_keyword_container(page, keyword, occurrence, logger)
             if not container:
-                if occurrence == 0:
-                    logger.debug("Keyword '%s' not found on current view", keyword)
+                # if occurrence == 0:
+                #     logger.debug("Keyword '%s' not found on current view", keyword)
                 break
             action_target = _resolve_action_target(container, keyword, logger)
             if not _safe_click_handle(action_target, logger):
@@ -1009,18 +1272,6 @@ def scan_current_view(
 ) -> Tuple[List[str], List[Indicator]]:
     artifacts, indicators = capture_page_state(browser, run_paths, label, logger)
     try:
-        reveal_artifacts, reveal_indicators = reveal_hidden_sections(
-            browser, run_paths, label, logger
-        )
-        artifacts.extend(reveal_artifacts)
-        indicators.extend(reveal_indicators)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Hidden-section reveal failed for '%s'; continuing without it: %s",
-            label,
-            exc,
-        )
-    try:
         if is_deposit_context(browser.page):
             form_artifacts, form_indicators = explore_deposit_form(
                 browser, run_paths, label, logger
@@ -1035,6 +1286,18 @@ def scan_current_view(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Deposit exploration failed for '%s'; continuing without it: %s",
+            label,
+            exc,
+        )
+    try:
+        reveal_artifacts, reveal_indicators = reveal_hidden_sections(
+            browser, run_paths, label, logger
+        )
+        artifacts.extend(reveal_artifacts)
+        indicators.extend(reveal_indicators)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Hidden-section reveal failed for '%s'; continuing without it: %s",
             label,
             exc,
         )
