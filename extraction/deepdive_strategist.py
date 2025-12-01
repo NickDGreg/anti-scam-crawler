@@ -19,13 +19,7 @@ from .io_utils import RunPaths, relative_artifact_path, sanitize_filename, save_
 from .login_flow import (
     perform_login,
 )
-from .parsing import (
-    BTC_PATTERN,
-    ETH_PATTERN,
-    TRON_PATTERN,
-    Indicator,
-    extract_indicators,
-)
+from .parsing import Indicator, extract_indicators, has_crypto_match
 
 MODULE_LOGGER = logging.getLogger(__name__)
 
@@ -331,11 +325,7 @@ def explore_interesting_pages(
 def _looks_like_crypto(candidate: str) -> bool:
     if not candidate:
         return False
-    if BTC_PATTERN.search(candidate):
-        return True
-    if ETH_PATTERN.search(candidate):
-        return True
-    return bool(TRON_PATTERN.search(candidate))
+    return has_crypto_match(candidate)
 
 
 def _collect_input_values(page, logger: logging.Logger) -> List[str]:

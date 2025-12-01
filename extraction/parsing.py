@@ -2,20 +2,10 @@
 
 from __future__ import annotations
 
-import html
 from dataclasses import dataclass
 from typing import Iterable, List, Tuple
 
-from .data_extractor import (
-    BANK_PATTERN,
-    BENEFICIARY_PATTERN,
-    BTC_PATTERN,
-    ETH_PATTERN,
-    IBAN_PATTERN,
-    TRON_PATTERN,
-    context_snippet,
-    strip_html,
-)
+from .data_extractor import extract_from_html, iter_crypto_strings
 
 
 @dataclass(slots=True)
@@ -27,51 +17,23 @@ class Indicator:
     artifact: str | None = None
 
 
-def _collect(
-    pattern, text: str, indicator_type: str, source_url: str
-) -> List[Indicator]:
-    indicators: List[Indicator] = []
-    for match in pattern.finditer(text):
-        start, end = match.span(
-            1 if pattern in {BENEFICIARY_PATTERN, BANK_PATTERN} else 0
-        )
-        value = match.group(1 if pattern in {BENEFICIARY_PATTERN, BANK_PATTERN} else 0)
-        indicators.append(
-            Indicator(
-                type=indicator_type,
-                value=value.strip(),
-                source_url=source_url,
-                context=context_snippet(text, start, end),
-            )
-        )
-    return indicators
-
-
 def extract_indicators(
     raw_html: str,
     source_url: str,
     *,
     extra_strings: Iterable[Tuple[str, str]] | None = None,
 ) -> List[Indicator]:
-    corpora: List[str] = [strip_html(raw_html), html.unescape(raw_html)]
-    if extra_strings:
-        for label, text in extra_strings:
-            if not text:
-                continue
-            prefix = f"{label}: " if label else ""
-            corpora.append(f"{prefix}{text}")
-
-    found: List[Indicator] = []
-    for corpus in corpora:
-        found.extend(_collect(IBAN_PATTERN, corpus, "IBAN", source_url))
-        found.extend(_collect(BTC_PATTERN, corpus, "BTC", source_url))
-        found.extend(_collect(ETH_PATTERN, corpus, "ETH", source_url))
-        found.extend(_collect(TRON_PATTERN, corpus, "TRON", source_url))
-        found.extend(
-            _collect(BENEFICIARY_PATTERN, corpus, "BENEFICIARY_NAME", source_url)
+    extracted = extract_from_html(raw_html, extra_strings=extra_strings)
+    indicators = [
+        Indicator(
+            type=item.type,
+            value=item.value,
+            source_url=source_url,
+            context=item.context,
         )
-        found.extend(_collect(BANK_PATTERN, corpus, "BANK_NAME", source_url))
-    return _deduplicate(found)
+        for item in extracted
+    ]
+    return _deduplicate(indicators)
 
 
 def _deduplicate(indicators: Iterable[Indicator]) -> List[Indicator]:
@@ -84,3 +46,7 @@ def _deduplicate(indicators: Iterable[Indicator]) -> List[Indicator]:
         seen.add(key)
         unique.append(indicator)
     return unique
+
+
+def has_crypto_match(text: str) -> bool:
+    return any(iter_crypto_strings(text))
