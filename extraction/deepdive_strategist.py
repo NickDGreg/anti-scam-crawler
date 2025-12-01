@@ -960,12 +960,15 @@ def _find_deposit_form_with_payments(
 
 
 def _select_payment_option(
-    select: Optional[ElementHandle], option: PaymentOption, logger: logging.Logger
+    page,
+    select: Optional[ElementHandle],
+    option: PaymentOption,
+    logger: logging.Logger,
 ) -> bool:
     if option.handle:
         if _safe_click_handle(option.handle, logger):
             try:
-                option.handle.page.wait_for_timeout(300)
+                page.wait_for_timeout(300)
             except PlaywrightError:
                 pass
             return True
@@ -1176,7 +1179,7 @@ def explore_deposit_form(
             )
             continue
         _fill_deposit_amount(form, logger)
-        if not _select_payment_option(select, target_option, logger):
+        if not _select_payment_option(page, select, target_option, logger):
             logger.debug(
                 "Unable to select payment option '%s'; skipping", target_option.label
             )
