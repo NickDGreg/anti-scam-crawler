@@ -60,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     map_parser.add_argument(
         "--allow-external",
         action="store_true",
-        help="Allow navigation outside the starting origin",
+        help="Cautiously allow navigation outside the starting registrable domain",
     )
     map_parser.add_argument(
         "--secret", required=True, help="Password or token for login"
@@ -134,6 +134,7 @@ def main(argv: list[str] | None = None) -> None:
             max_pages=args.max_pages,
             max_depth=args.max_depth,
             same_origin_only=not args.allow_external,
+            allow_external=args.allow_external,
         )
         mapping_result = run_mapping(inputs)
         result = mapping_result.to_dict()

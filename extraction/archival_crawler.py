@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import asdict, dataclass
 from typing import Deque, Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse, urlunparse
 
+import tldextract
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -45,6 +46,27 @@ SKIP_EXTENSIONS = (
     ".webm",
     ".webp",
 )
+ALLOWED_SCHEMES = {"http", "https"}
+INFRA_DOMAIN_BLOCKLIST: Set[str] = {
+    "google.com",
+    "google.ch",
+    "consent.google.com",
+    "policies.google.com",
+    "about.google.com",
+    "about.google",
+    "youtube.com",
+    "consent.youtube.com",
+    "accounts.google.com",
+    "g.co",
+    "goo.gl",
+    "facebook.com",
+    "instagram.com",
+    "twitter.com",
+    "x.com",
+}
+HIGH_VALUE_EXTERNAL_DOMAINS: Set[str] = set()
+AUTH_WALL_REDIRECT_THRESHOLD = 2
+_TLD_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=None)
 
 
 @dataclass(slots=True)
@@ -57,6 +79,7 @@ class MappingInputs:
     max_pages: int = 100
     max_depth: int = 3
     same_origin_only: bool = True
+    allow_external: bool = False
 
 
 @dataclass(slots=True)
@@ -92,8 +115,28 @@ class MappingResult:
 
 
 def _origin_host(url: str) -> str:
+    return _registrable_domain(url)
+
+
+def _extract_host(url: str) -> str:
     parsed = urlparse(url)
     return (parsed.hostname or "").lower().lstrip("www.")
+
+
+def _registrable_domain(url: str) -> str:
+    host = _extract_host(url)
+    if not host:
+        return ""
+    extracted = _TLD_EXTRACTOR(host)
+    if extracted.domain and extracted.suffix:
+        return f"{extracted.domain}.{extracted.suffix}".lower()
+    return host
+
+
+def _is_same_site(url: str, home_domain: str) -> bool:
+    if not home_domain:
+        return False
+    return _registrable_domain(url) == home_domain
 
 
 def _normalize_url(candidate: str) -> Optional[str]:
@@ -101,6 +144,8 @@ def _normalize_url(candidate: str) -> Optional[str]:
         return None
     parsed = urlparse(candidate)
     if not parsed.scheme or parsed.scheme in {"mailto", "tel"}:
+        return None
+    if parsed.scheme.lower() not in ALLOWED_SCHEMES:
         return None
     host = (parsed.hostname or "").lower().lstrip("www.")
     if not host:
@@ -137,23 +182,26 @@ def _looks_like_register(url: str) -> bool:
     return _contains_hint(url, REGISTER_PATH_HINTS)
 
 
-def _should_skip_link(url: str, *, same_origin_only: bool, origin_host: str) -> bool:
-    if not url:
-        return True
-    if same_origin_only and _origin_host(url) != origin_host:
-        return True
+def _is_static_asset(url: str) -> bool:
     lowered = url.lower()
     return lowered.endswith(SKIP_EXTENSIONS)
+
+
+def _is_infra_domain(domain: str, home_domain: str) -> bool:
+    return bool(domain and domain != home_domain and domain in INFRA_DOMAIN_BLOCKLIST)
 
 
 def extract_links(
     page,
     base_url: str,
     *,
-    same_origin_only: bool,
-    origin_host: str,
+    home_domain: str,
+    allow_external: bool,
     logger: logging.Logger,
     avoid_auth_links: bool = True,
+    external_allowlist: Set[str] | None = None,
+    infra_blocklist: Set[str] | None = None,
+    blocked_domains: Set[str] | None = None,
 ) -> List[str]:
     """Extract and normalize hyperlink targets from the current page."""
     try:
@@ -165,6 +213,11 @@ def extract_links(
         logger.debug("Failed to enumerate anchors on %s: %s", base_url, exc)
         return []
 
+    allowlist = (
+        HIGH_VALUE_EXTERNAL_DOMAINS
+        if external_allowlist is None
+        else external_allowlist
+    )
     candidates: List[str] = []
     seen: Set[str] = set()
     for href in raw_links or []:
@@ -172,9 +225,19 @@ def extract_links(
         normalized = _normalize_url(absolute)
         if not normalized or normalized in seen:
             continue
-        if _should_skip_link(
-            normalized, same_origin_only=same_origin_only, origin_host=origin_host
-        ):
+        domain = _registrable_domain(normalized)
+        if blocked_domains and domain in blocked_domains:
+            logger.debug(
+                "Skipping URL on blocked auth-wall domain %s: %s", domain, normalized
+            )
+            continue
+        if infra_blocklist and _is_infra_domain(domain, home_domain=home_domain):
+            logger.debug(
+                "Skipping infra domain link (%s): %s", domain or "<unknown>", normalized
+            )
+            continue
+        if _is_static_asset(normalized):
+            logger.debug("Skipping static asset link: %s", normalized)
             continue
         if _looks_like_logout(normalized):
             logger.debug("Skipping potential logout link: %s", normalized)
@@ -184,6 +247,16 @@ def extract_links(
         ):
             logger.debug("Skipping auth-related link: %s", normalized)
             continue
+        same_site = _is_same_site(normalized, home_domain)
+        if not same_site:
+            if not allow_external:
+                logger.debug("Skipping external URL (same-site only): %s", normalized)
+                continue
+            if domain not in allowlist:
+                logger.debug(
+                    "Skipping external URL (domain not allowlisted): %s", normalized
+                )
+                continue
         seen.add(normalized)
         candidates.append(normalized)
     return candidates
@@ -235,20 +308,27 @@ def run_mapping(inputs: MappingInputs) -> MappingResult:
     logger = inputs.logger
     notes: List[str] = []
     page_records: List[PageRecord] = []
-    queue: Deque[Tuple[str, int]] = deque()
+    same_site_queue: Deque[Tuple[str, int]] = deque()
+    external_queue: Deque[Tuple[str, int]] = deque()
     seen: Set[str] = set()
+    blocked_auth_domains: Set[str] = set()
+    login_redirect_counts: Dict[str, int] = defaultdict(int)
     page_counter = 1
     start_url = _normalize_url(inputs.start_url) or inputs.start_url
-    login_redirects = 0
     page_limit_hit = False
     logged_in = False
+    allow_external = inputs.allow_external or not inputs.same_origin_only
 
     logger.debug(
-        "Starting site mapping from %s (max_pages=%d, max_depth=%d, same_origin_only=%s)",
+        (
+            "Starting site mapping from %s "
+            "(max_pages=%d, max_depth=%d, same_origin_only=%s, allow_external=%s)"
+        ),
         start_url,
         inputs.max_pages,
         inputs.max_depth,
         inputs.same_origin_only,
+        allow_external,
     )
 
     try:
@@ -265,7 +345,7 @@ def run_mapping(inputs: MappingInputs) -> MappingResult:
                 run_paths=inputs.run_paths,
             )
             start_url = _normalize_url(page.url) or page.url
-            origin_host = _origin_host(start_url)
+            home_domain = _registrable_domain(start_url)
             if not login_result.success:
                 notes.extend(login_result.notes)
                 status = login_result.status
@@ -282,18 +362,47 @@ def run_mapping(inputs: MappingInputs) -> MappingResult:
                 return result
             logged_in = True
 
-            queue.append((start_url, 0))
+            same_site_queue.append((start_url, 0))
             page = browser.page
-            while queue and len(page_records) < inputs.max_pages:
-                target_url, depth = queue.popleft()
+            while (same_site_queue or external_queue) and len(
+                page_records
+            ) < inputs.max_pages:
+                if same_site_queue:
+                    target_url, depth = same_site_queue.popleft()
+                    queue_label = "same-site"
+                else:
+                    target_url, depth = external_queue.popleft()
+                    queue_label = "external"
                 normalized_target = _normalize_url(target_url)
                 if not normalized_target:
                     logger.debug("Skipping invalid URL: %s", target_url)
                     continue
                 if normalized_target in seen:
                     continue
+                domain = _registrable_domain(normalized_target)
+                if _is_infra_domain(domain, home_domain):
+                    logger.debug(
+                        "Skipping infra domain before navigation (%s): %s",
+                        domain or "<unknown>",
+                        normalized_target,
+                    )
+                    seen.add(normalized_target)
+                    continue
+                if domain in blocked_auth_domains:
+                    logger.debug(
+                        "Skipping URL on blocked auth-wall domain %s: %s",
+                        domain or "<unknown>",
+                        normalized_target,
+                    )
+                    seen.add(normalized_target)
+                    continue
                 seen.add(normalized_target)
-                logger.info("Crawling depth %d URL: %s", depth, normalized_target)
+                logger.info(
+                    "Crawling depth %d %s URL: %s",
+                    depth,
+                    queue_label,
+                    normalized_target,
+                )
 
                 try:
                     response = page.goto(
@@ -358,16 +467,41 @@ def run_mapping(inputs: MappingInputs) -> MappingResult:
                     continue
 
                 final_url = _normalize_url(page.url) or page.url
+                final_domain = _registrable_domain(final_url)
+                skip_link_expansion = False
                 if _looks_like_login(final_url):
-                    login_redirects += 1
-                    if login_redirects > 1:
+                    login_redirect_counts[final_domain] += 1
+                    redirect_count = login_redirect_counts[final_domain]
+                    if (
+                        final_domain
+                        and final_domain != home_domain
+                        and redirect_count >= (AUTH_WALL_REDIRECT_THRESHOLD)
+                    ):
+                        blocked_auth_domains.add(final_domain)
+                        skip_link_expansion = True
+                        logger.warning(
+                            (
+                                "Repeated login redirection detected on external domain "
+                                "%s (count=%d); blocking further navigation"
+                            ),
+                            final_domain or "<unknown>",
+                            redirect_count,
+                        )
+                    elif redirect_count > 1:
                         logger.warning(
                             "Repeated login redirection detected (count=%d) at %s",
-                            login_redirects,
+                            redirect_count,
                             final_url,
                         )
                     else:
                         logger.info("Encountered login-like page at %s", final_url)
+                elif final_domain in blocked_auth_domains:
+                    skip_link_expansion = True
+                    logger.debug(
+                        "Final URL %s is on blocked auth-wall domain %s; not expanding links",
+                        final_url,
+                        final_domain or "<unknown>",
+                    )
 
                 status_code = response.status if response else None
                 record = archive_page(
@@ -389,20 +523,37 @@ def run_mapping(inputs: MappingInputs) -> MappingResult:
                     depth,
                 )
 
-                if depth >= inputs.max_depth:
+                if depth >= inputs.max_depth or skip_link_expansion:
                     continue
 
                 links = extract_links(
                     page,
                     base_url=final_url,
-                    same_origin_only=inputs.same_origin_only,
-                    origin_host=origin_host,
+                    home_domain=home_domain,
+                    allow_external=allow_external,
                     logger=logger,
                     avoid_auth_links=logged_in,
+                    external_allowlist=HIGH_VALUE_EXTERNAL_DOMAINS,
+                    infra_blocklist=INFRA_DOMAIN_BLOCKLIST,
+                    blocked_domains=blocked_auth_domains,
                 )
                 for link in links:
-                    if link not in seen:
-                        queue.append((link, depth + 1))
+                    if link in seen:
+                        continue
+                    link_domain = _registrable_domain(link)
+                    if link_domain in blocked_auth_domains:
+                        logger.debug(
+                            "Not enqueueing URL on blocked auth-wall domain %s: %s",
+                            link_domain or "<unknown>",
+                            link,
+                        )
+                        continue
+                    if depth + 1 > inputs.max_depth:
+                        continue
+                    if _is_same_site(link, home_domain):
+                        same_site_queue.append((link, depth + 1))
+                    else:
+                        external_queue.append((link, depth + 1))
 
             page_limit_hit = len(page_records) >= inputs.max_pages
     except Exception as exc:  # noqa: BLE001

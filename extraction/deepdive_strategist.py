@@ -12,7 +12,12 @@ from playwright.sync_api import ElementHandle
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from .archival_crawler import _normalize_url, _origin_host, extract_links
+from .archival_crawler import (
+    INFRA_DOMAIN_BLOCKLIST,
+    _normalize_url,
+    _registrable_domain,
+    extract_links,
+)
 from .automation import click_by_text, submit_form_element
 from .browser import BrowserConfig, BrowserSession
 from .io_utils import RunPaths, relative_artifact_path, sanitize_filename, save_text
@@ -271,15 +276,16 @@ def explore_interesting_pages(
 
     def follow_deposit_links(max_links: int) -> int:
         consumed = 0
-        origin_host = _origin_host(page.url)
+        home_domain = _registrable_domain(page.url)
         try:
             links = extract_links(
                 page,
                 page.url,
-                same_origin_only=True,
-                origin_host=origin_host,
+                home_domain=home_domain,
+                allow_external=False,
                 logger=logger,
                 avoid_auth_links=False,
+                infra_blocklist=INFRA_DOMAIN_BLOCKLIST,
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("extract_links failed during deep-dive deposit scan: %s", exc)
