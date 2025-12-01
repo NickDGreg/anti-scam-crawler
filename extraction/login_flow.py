@@ -168,7 +168,15 @@ def attempt_login_with_retries(
 
 
 def login_form_still_present(page, logger: logging.Logger | None = None) -> bool:
-    form = get_login_form(page, logger=logger)
+    log = logger or logging.getLogger(__name__)
+    try:
+        form = get_login_form(page, logger=logger)
+    except PlaywrightError as exc:
+        log.debug(
+            "login_form_still_present: ignoring PlaywrightError; treating as no form present: %s",
+            exc,
+        )
+        return False
     return form is not None
 
 

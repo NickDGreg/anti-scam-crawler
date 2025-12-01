@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, Optional
 
 from playwright.sync_api import ElementHandle, Page
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 EMAIL_SELECTORS = [
@@ -71,8 +72,15 @@ def find_form(
     *,
     logger: Optional[logging.Logger] = None,
 ) -> Optional[FormDefinition]:
-    forms = target.query_selector_all("form")
     log = _resolve_logger(logger)
+    try:
+        forms = target.query_selector_all("form")
+    except PlaywrightError as exc:
+        log.debug(
+            "find_form: ignoring PlaywrightError during query_selector_all('form'): %s",
+            exc,
+        )
+        return None
     log.debug("Scanning %d forms for fields: %s", len(forms), list(field_map.keys()))
     for form in forms:
         handles: Dict[str, ElementHandle] = {}
