@@ -15,6 +15,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from .browser import BrowserConfig, BrowserSession
 from .io_utils import RunPaths, relative_artifact_path, save_text, write_json
 from .login_flow import perform_login
+from .page_utils import safe_goto
 
 LOGIN_PATH_HINTS = ("login", "signin", "sign-in", "sign_in")
 LOGOUT_PATH_HINTS = ("logout", "log-out", "signout", "signout", "sign-out", "logoff")
@@ -405,8 +406,11 @@ def run_mapping(inputs: MappingInputs) -> MappingResult:
                 )
 
                 try:
-                    response = page.goto(
-                        normalized_target, wait_until="load", timeout=20000
+                    response = safe_goto(
+                        page,
+                        normalized_target,
+                        logger=logger,
+                        timeout_ms=20000,
                     )
                 except PlaywrightTimeoutError as exc:
                     logger.warning(

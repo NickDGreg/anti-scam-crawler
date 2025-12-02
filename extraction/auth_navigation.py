@@ -13,6 +13,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from .automation import click_keywords
+from .page_utils import safe_goto
 
 FormT = TypeVar("FormT")
 MetaT = TypeVar("MetaT")
@@ -85,7 +86,7 @@ def discover_form_with_navigation(
 
         if page.url != target_url:
             try:
-                page.goto(target_url, wait_until="load", timeout=20000)
+                safe_goto(page, target_url, logger=logger, timeout_ms=20000)
             except PlaywrightTimeoutError as exc:
                 logger.debug("Navigation to %s timed out: %s", target_url, exc)
                 continue

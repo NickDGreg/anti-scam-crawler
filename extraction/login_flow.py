@@ -22,6 +22,7 @@ from .automation import (
     submit_form,
 )
 from .io_utils import RunPaths, relative_artifact_path, save_text
+from .page_utils import wait_for_page_ready
 
 LOGGED_IN_HINTS = ("logout", "log out", "dashboard", "my account", "profile", "cabinet")
 LOGIN_PATH_HINTS = ("login", "signin", "sign-in", "sign_in")
@@ -133,7 +134,7 @@ def attempt_login_with_retries(
         logger.debug("Submitting login form (attempt %d)", attempt)
         submit_form(form, logger=logger)
         try:
-            page.wait_for_load_state("load", timeout=20000)
+            wait_for_page_ready(page, logger=logger, timeout_ms=20000)
         except PlaywrightTimeoutError:
             logger.debug(
                 "Login attempt %d did not trigger navigation within timeout", attempt
