@@ -111,6 +111,10 @@ MODAL_WAIT_SELECTOR = (
     ".chakra-modal__content, .MuiDialog-root, .v-modal, .ant-drawer-open"
 )
 
+PAYMENT_TOGGLE_PATTERN = re.compile(
+    r"(method|payment|pay|gateway|channel|crypto|coin|type|process)", re.IGNORECASE
+)
+
 
 @dataclass(slots=True)
 class ProbeInputs:
@@ -768,6 +772,95 @@ class PaymentOption:
     handle: Optional[ElementHandle] = None
 
 
+def _get_form_for_handle(
+    handle: ElementHandle, logger: logging.Logger
+) -> Optional[ElementHandle]:
+    try:
+        form_handle = handle.evaluate_handle(
+            "el => el && el.closest ? el.closest('form') : null"
+        )
+    except PlaywrightError as exc:
+        logger.debug("Failed to resolve closest form for handle: %s", exc)
+        return None
+    if not form_handle:
+        return None
+    element = form_handle.as_element()
+    if not element:
+        return None
+    return element
+
+
+def _find_submit_control(
+    form: ElementHandle, logger: logging.Logger
+) -> Optional[ElementHandle]:
+    primary_selectors = (
+        "button[type='submit' i]",
+        "input[type='submit' i]",
+        "button:not([type])",
+    )
+    for selector in primary_selectors:
+        try:
+            handle = form.query_selector(selector)
+        except PlaywrightError as exc:
+            logger.debug("Submit control lookup failed for '%s': %s", selector, exc)
+            continue
+        if handle:
+            return handle
+    submit_keywords = ("deposit", "continue", "confirm", "proceed", "next", "pay")
+    text_bases = ("button", "[role='button']", "input[type='button' i]", "a")
+    for keyword in submit_keywords:
+        for base in text_bases:
+            selector = _format_has_text_selector(base, keyword)
+            try:
+                handle = form.query_selector(selector)
+            except PlaywrightError:
+                handle = None
+            if handle:
+                return handle
+    return None
+
+
+def _ensure_plan_selection(form: ElementHandle, logger: logging.Logger) -> None:
+    try:
+        radios = form.query_selector_all("input[type='radio' i]")
+    except PlaywrightError as exc:
+        logger.debug("Plan radio enumeration failed: %s", exc)
+        return
+    groups: Dict[str, List[ElementHandle]] = {}
+    for radio in radios:
+        try:
+            name = (radio.get_attribute("name") or "").strip().lower()
+        except PlaywrightError:
+            name = ""
+        if not name:
+            continue
+        if re.search("method|payment|pay|gateway|coin|crypto|type", name):
+            continue
+        groups.setdefault(name, []).append(radio)
+    for name, group_radios in groups.items():
+        has_checked = False
+        for radio in group_radios:
+            try:
+                if radio.evaluate("el => !!el.checked"):
+                    has_checked = True
+                    break
+            except PlaywrightError:
+                continue
+        if has_checked or not group_radios:
+            continue
+        target_radio = group_radios[0]
+        if _safe_click_handle(target_radio, logger):
+            logger.debug("Selected default plan option for radio group '%s'", name)
+            continue
+        try:
+            target_radio.evaluate(
+                "el => { el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); }"
+            )
+            logger.debug("Script-selected plan option for radio group '%s'", name)
+        except PlaywrightError:
+            logger.debug("Unable to select plan radio for group '%s'", name)
+
+
 def _deposit_form_candidate(form: ElementHandle, logger: logging.Logger) -> bool:
     try:
         method = (form.get_attribute("method") or "").lower()
@@ -885,11 +978,15 @@ def _extract_clickable_payment_options(
         except PlaywrightError:
             name_and_id = ""
             value_attr = ""
-        if not re.search("method|payment|pay|gateway|channel|crypto|coin", name_and_id):
-            if not re.search(
-                "method|payment|pay|gateway|channel|crypto|coin", value_attr
-            ):
-                continue
+        if not PAYMENT_TOGGLE_PATTERN.search(
+            name_and_id
+        ) and not PAYMENT_TOGGLE_PATTERN.search(value_attr):
+            logger.debug(
+                "Skipping radio as payment candidate: name/id='%s', value='%s'",
+                name_and_id,
+                value_attr,
+            )
+            continue
         if toggle and id(toggle) not in seen_handles:
             seen_handles.add(id(toggle))
             handles.append(toggle)
@@ -934,7 +1031,9 @@ def _extract_clickable_payment_options(
 
 def _find_deposit_form_with_payments(
     page, logger: logging.Logger
-) -> Optional[Tuple[ElementHandle, Optional[ElementHandle], List[PaymentOption]]]:
+) -> Optional[
+    Tuple[ElementHandle, Optional[ElementHandle], List[PaymentOption], ElementHandle]
+]:
     try:
         forms = page.query_selector_all("form")
     except PlaywrightError as exc:
@@ -943,14 +1042,27 @@ def _find_deposit_form_with_payments(
     for form in forms:
         if not _deposit_form_candidate(form, logger):
             continue
+        submit = _find_submit_control(form, logger)
+        logger.debug(
+            "Deposit form candidate on %s: has_submit=%s",
+            page.url,
+            bool(submit),
+        )
+        if not submit:
+            logger.debug(
+                "Skipping deposit form candidate without submit control on %s", page.url
+            )
+            continue
         select = _find_payment_select(form, logger)
         if select:
             options = _extract_payment_options(select, logger)
+            logger.debug("Found %d select-based payment options", len(options))
             if options:
-                return form, select, options
+                return form, select, options, submit
         clickable_options = _extract_clickable_payment_options(form, logger)
+        logger.debug("Found %d clickable payment options", len(clickable_options))
         if clickable_options:
-            return form, None, clickable_options
+            return form, None, clickable_options, submit
     logger.debug("No deposit form with payment options detected on %s", page.url)
     return None
 
@@ -1096,19 +1208,43 @@ def _match_payment_option(
 
 
 def _submit_deposit_form(page, form: ElementHandle, logger: logging.Logger) -> None:
+    submit = _find_submit_control(form, logger)
+
+    def _perform_submit() -> None:
+        if submit and _safe_click_handle(submit, logger):
+            return
+        submit_form_element(form, logger=logger)
+
     try:
         with page.expect_navigation(wait_until="load", timeout=12000):
-            submit_form_element(form, logger=logger)
+            _perform_submit()
         return
     except PlaywrightTimeoutError:
-        logger.debug("Deposit form submission did not trigger navigation in time")
+        logger.debug(
+            "Deposit form submission did not complete 'load' navigation in time"
+        )
     except PlaywrightError as exc:
         logger.warning("Failed to submit deposit form: %s", exc)
         return
     try:
-        page.wait_for_load_state("load", timeout=6000)
+        with page.expect_navigation(wait_until="domcontentloaded", timeout=12000):
+            _perform_submit()
+        return
     except PlaywrightTimeoutError:
-        logger.debug("Network idle wait after submit timed out; continuing")
+        logger.debug(
+            "Deposit form submission did not reach DOMContentLoaded navigation in time"
+        )
+    except PlaywrightError as exc:
+        logger.warning("Fallback deposit form submission failed: %s", exc)
+        return
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=6000)
+    except PlaywrightTimeoutError:
+        logger.debug("DOMContentLoaded wait after submit timed out; continuing")
+        try:
+            page.wait_for_timeout(800)
+        except PlaywrightError:
+            pass
 
 
 def explore_deposit_form(
@@ -1122,7 +1258,7 @@ def explore_deposit_form(
     detection = _find_deposit_form_with_payments(page, logger)
     if not detection:
         return [], []
-    _, _, options = detection
+    _, _, options, _ = detection
     payment_options = options[:max_payment_options]
     if not payment_options:
         logger.debug("Deposit form detected but no selectable payment options found")
@@ -1167,13 +1303,14 @@ def explore_deposit_form(
         if not detection:
             logger.debug("Deposit form still missing after reload (option %d)", idx + 1)
             break
-        form, select, current_options = detection
+        form, select, current_options, _ = detection
         target_option = _match_payment_option(option, current_options)
         if not target_option:
             logger.debug(
                 "Unable to find payment option to match '%s'; skipping", option.label
             )
             continue
+        _ensure_plan_selection(form, logger)
         _fill_deposit_amount(form, logger)
         if not _select_payment_option(page, select, target_option, logger):
             logger.debug(
@@ -1208,6 +1345,7 @@ def click_deposit_methods(
     run_paths: RunPaths,
     base_label: str,
     logger: logging.Logger,
+    exclude_form: Optional[ElementHandle] = None,
     max_clicks: int = 6,
 ) -> Tuple[List[str], List[Indicator]]:
     artifacts: List[str] = []
@@ -1228,6 +1366,14 @@ def click_deposit_methods(
                 #     logger.debug("Keyword '%s' not found on current view", keyword)
                 break
             action_target = _resolve_action_target(container, keyword, logger)
+            if exclude_form:
+                container_form = _get_form_for_handle(container, logger)
+                if container_form and container_form == exclude_form:
+                    logger.debug(
+                        "Skipping modal-style click for '%s' inside handled deposit form",
+                        keyword,
+                    )
+                    continue
             if not _safe_click_handle(action_target, logger):
                 logger.debug(
                     "Unable to click action target for keyword '%s' (occurrence %d)",
@@ -1277,8 +1423,17 @@ def scan_current_view(
             )
             artifacts.extend(form_artifacts)
             indicators.extend(form_indicators)
+            exclude_form: Optional[ElementHandle] = None
+            try:
+                detection = _find_deposit_form_with_payments(browser.page, logger)
+                if detection:
+                    exclude_form = detection[0]
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "Deposit form detection failed before modal clicks: %s", exc
+                )
             method_artifacts, method_indicators = click_deposit_methods(
-                browser, run_paths, label, logger
+                browser, run_paths, label, logger, exclude_form=exclude_form
             )
             artifacts.extend(method_artifacts)
             indicators.extend(method_indicators)
