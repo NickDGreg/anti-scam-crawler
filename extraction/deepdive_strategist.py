@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from dataclasses import asdict, dataclass
@@ -114,6 +115,7 @@ MODAL_WAIT_SELECTOR = (
 PAYMENT_TOGGLE_PATTERN = re.compile(
     r"(method|payment|pay|gateway|channel|crypto|coin|type|process)", re.IGNORECASE
 )
+MAX_LABEL_CHARS = 120
 
 
 @dataclass(slots=True)
@@ -466,6 +468,15 @@ def _snapshot_dom(
     return html, extra_strings
 
 
+def _safe_artifact_label(raw: str) -> str:
+    base = sanitize_filename(raw) or "page"
+    if len(base) <= MAX_LABEL_CHARS:
+        return base
+    digest = hashlib.sha1(base.encode("utf-8")).hexdigest()[:8]
+    head = base[: MAX_LABEL_CHARS - 9]  # room for '_' + digest
+    return f"{head}_{digest}"
+
+
 def _scan_crypto_fingerprint(page, logger: logging.Logger) -> Set[Tuple[str, str]]:
     html, extra_strings = _snapshot_dom(page, logger)
     indicators = extract_indicators(html, page.url, extra_strings=extra_strings)
@@ -498,10 +509,13 @@ def capture_page_state(
 ) -> Tuple[List[str], List[Indicator]]:
     page = browser.page
     log = logger or MODULE_LOGGER
-    log.debug("Capturing page state '%s' at URL %s", label, page.url)
+    safe_label = _safe_artifact_label(label)
+    log.debug(
+        "Capturing page state '%s' as '%s' at URL %s", label, safe_label, page.url
+    )
     html, extra_strings = _snapshot_dom(page, log)
-    html_path = save_text(run_paths.build_path(f"{label}.html"), html)
-    screenshot_path = browser.screenshot(run_paths.build_path(f"{label}.png"))
+    html_path = save_text(run_paths.build_path(f"{safe_label}.html"), html)
+    screenshot_path = browser.screenshot(run_paths.build_path(f"{safe_label}.png"))
     artifacts = [
         relative_artifact_path(html_path),
         relative_artifact_path(screenshot_path),
@@ -649,6 +663,35 @@ def _locate_container_from_handle(
         logger.debug("Container detection failed: %s", exc)
         container = None
     return container or handle
+
+
+def _normalize_option_label(raw_label: str, raw_value: str) -> str:
+    text = (raw_label or raw_value or "").strip()
+    if not text:
+        return "option"
+    lowered = text.lower()
+    for kw in (
+        "bitcoin",
+        "btc",
+        "ethereum",
+        "eth",
+        "tether",
+        "usdt",
+        "trc20",
+        "erc20",
+        "tron",
+        "ltc",
+        "litecoin",
+        "bank transfer",
+        "wire",
+        "visa",
+        "mastercard",
+    ):
+        if kw in lowered:
+            return kw.replace(" ", "_")
+    if len(text) > 40:
+        return text[:40].strip()
+    return text
 
 
 def _find_keyword_container(
@@ -1018,7 +1061,7 @@ def _extract_clickable_payment_options(
             except PlaywrightError:
                 label_text = ""
         value = data_value or label_text
-        label = label_text or data_value
+        label = _normalize_option_label(label_text, data_value)
         if not (value or label):
             continue
         key = (value.lower(), label.lower())
@@ -1252,7 +1295,7 @@ def explore_deposit_form(
     run_paths: RunPaths,
     base_label: str,
     logger: logging.Logger,
-    max_payment_options: int = 3,
+    max_payment_options: int = 8,
 ) -> Tuple[List[str], List[Indicator]]:
     page = browser.page
     detection = _find_deposit_form_with_payments(page, logger)

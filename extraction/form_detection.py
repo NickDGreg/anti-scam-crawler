@@ -25,6 +25,17 @@ LOGIN_KEYWORDS = ("log in", "login", "sign in", "client area")
 MIN_REGISTRATION_SCORE = 20
 CONTACT_KEYWORDS = ("contact", "support", "message", "help", "assist")
 CONTACT_ACTION_KEYWORDS = ("contact", "support", "help", "ticket", "message")
+ORPHAN_EXTRA_KEYWORDS = (
+    "gender",
+    "marital",
+    "marriage",
+    "address",
+    "city",
+    "state",
+    "province",
+    "zip",
+    "postal",
+)
 
 
 def find_best_registration_form(
@@ -49,6 +60,8 @@ def find_best_registration_form(
             best_classifications = classifications
     if best and best.score >= MIN_REGISTRATION_SCORE:
         logger.info("Selected form #%s with score %.1f", best.index, best.score)
+        attach_orphan_controls_to_form(page, best, logger)
+        best_classifications = [classify_field(field) for field in best.fields]
         return best, best_classifications
     logger.warning(
         "No registration-like form over threshold (best=%.1f)",
@@ -176,6 +189,166 @@ def _build_field_descriptor(
     )
 
 
+def _find_form_container(form_handle: ElementHandle) -> ElementHandle:
+    try:
+        container_handle = form_handle.evaluate_handle(
+            """
+            (form) => {
+              const preferred = form.closest('.main-signup-body, .card, .form-card, .form-wrapper, .form-container');
+              if (preferred) return preferred;
+              const ancestor = form.closest('section, article, main') || form.parentElement;
+              return ancestor || form;
+            }
+            """
+        )
+        container_element = container_handle.as_element() if container_handle else None
+        if container_element:
+            return container_element
+    except Exception:
+        pass
+    return form_handle
+
+
+def _descriptor_signature(descriptor: FieldDescriptor) -> tuple:
+    return (
+        descriptor.tag,
+        descriptor.name,
+        descriptor.identifier,
+        descriptor.placeholder,
+        descriptor.aria_label,
+        descriptor.surrounding_text,
+    )
+
+
+def _descriptor_text(descriptor: FieldDescriptor) -> str:
+    parts: List[str] = []
+    parts.extend(descriptor.labels or [])
+    for candidate in (
+        descriptor.placeholder,
+        descriptor.aria_label,
+        descriptor.surrounding_text,
+        descriptor.name,
+        descriptor.identifier,
+    ):
+        if candidate:
+            parts.append(str(candidate))
+    return " ".join(parts).strip()
+
+
+def _looks_like_consent(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    if "terms" in lowered and ("condition" in lowered or "conditions" in lowered):
+        return True
+    if "terms" in lowered and "agree" in lowered:
+        return True
+    return False
+
+
+def _looks_like_registration_extra(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in ORPHAN_EXTRA_KEYWORDS)
+
+
+def _should_attach_orphan(descriptor: FieldDescriptor, text: str) -> bool:
+    input_type = (descriptor.input_type or "").lower()
+    if descriptor.required:
+        return True
+    if input_type in {"checkbox", "radio"} and _looks_like_consent(text):
+        return True
+    if _looks_like_registration_extra(text):
+        return True
+    return False
+
+
+def attach_orphan_controls_to_form(
+    page: Page, descriptor: FormDescriptor, logger: logging.Logger
+) -> None:
+    _ = page  # page available for future heuristics
+    container = _find_form_container(descriptor.element)
+    controls = container.query_selector_all(FIELD_QUERY)
+    if not controls:
+        return
+
+    existing_handles = {id(field.handle) for field in descriptor.fields}
+    existing_keys = {
+        (field.tag, field.name, field.identifier)
+        for field in descriptor.fields
+        if field.name or field.identifier
+    }
+    existing_signatures = {_descriptor_signature(field) for field in descriptor.fields}
+    max_order = max((field.order for field in descriptor.fields), default=-1)
+    next_order = max_order + 1
+    attached = 0
+
+    for control in controls:
+        try:
+            handle_id = id(control)
+            if handle_id in existing_handles:
+                continue
+
+            tag = (control.evaluate("el => el.tagName.toLowerCase()") or "").lower()
+            input_type = (
+                (control.get_attribute("type") or "").lower() if tag == "input" else ""
+            )
+            if tag == "input" and input_type in IGNORED_INPUT_TYPES:
+                continue
+
+            name = control.get_attribute("name")
+            identifier = control.get_attribute("id")
+            key = (tag, name, identifier)
+            if (name or identifier) and key in existing_keys:
+                continue
+
+            belongs_to_form = False
+            try:
+                belongs_to_form = bool(
+                    control.evaluate(
+                        "(el, formEl) => el.form === formEl", descriptor.element
+                    )
+                )
+            except Exception:
+                belongs_to_form = False
+            if belongs_to_form:
+                continue
+
+            field_descriptor = _build_field_descriptor(control, next_order)
+            if not field_descriptor:
+                continue
+
+            signature = _descriptor_signature(field_descriptor)
+            if signature in existing_signatures:
+                continue
+
+            text_blob = _descriptor_text(field_descriptor)
+            if not _should_attach_orphan(field_descriptor, text_blob):
+                continue
+
+            descriptor.fields.append(field_descriptor)
+            existing_handles.add(handle_id)
+            existing_signatures.add(signature)
+            if name or identifier:
+                existing_keys.add(key)
+            logger.debug(
+                "Attached orphan field %s (%s)",
+                field_descriptor.canonical_name(),
+                (field_descriptor.surrounding_text or text_blob)[:80],
+            )
+            next_order += 1
+            attached += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Skipping orphan candidate due to error: %s", exc)
+            continue
+
+    if attached:
+        logger.info(
+            "Attached %s orphan controls near form #%s", attached, descriptor.index
+        )
+
+
 def score_form_candidate(
     descriptor: FormDescriptor,
     classifications: Sequence[FieldClassification],
@@ -287,5 +460,6 @@ def _is_contact_like_form(descriptor: FormDescriptor) -> bool:
 __all__ = [
     "find_best_registration_form",
     "extract_form_descriptors",
+    "attach_orphan_controls_to_form",
     "score_form_candidate",
 ]
