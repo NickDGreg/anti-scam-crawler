@@ -31,7 +31,7 @@ from .value_assignment import (
     assign_registration_values,
 )
 
-DEFAULT_PASSWORD = "AntiScam!234"
+DEFAULT_PASSWORD = "bellaciao!234"
 REG_NAVIGATION = NavigationConfig(
     primary_keywords=(
         "register",
@@ -55,6 +55,12 @@ REG_NAVIGATION = NavigationConfig(
     fallback_keywords=KEYWORD_CLICKS,
     fallback_clicks=4,
 )
+
+SENSITIVE_LOGGING_SEMANTICS = {
+    FieldSemantic.EMAIL,
+    FieldSemantic.PASSWORD,
+    FieldSemantic.PASSWORD_CONFIRM,
+}
 
 
 @dataclass(slots=True)
@@ -200,19 +206,81 @@ def _discover_registration_form(
     )
 
 
+def _log_form_details(form_descriptor: FormDescriptor, logger: logging.Logger) -> None:
+    heading = (form_descriptor.heading_text or "").strip()
+    heading = " ".join(heading.split())
+    if heading and len(heading) > 80:
+        heading = f"{heading[:79]}…"
+    logger.info(
+        "Inspecting registration form #%s: fields=%s, method=%s, action=%s, heading=%s",
+        form_descriptor.index,
+        len(form_descriptor.fields),
+        form_descriptor.method or "n/a",
+        form_descriptor.action or "n/a",
+        heading or "n/a",
+    )
+
+
 def _log_field_classifications(
     classifications: List[FieldClassification], logger: logging.Logger
 ) -> None:
+    if not classifications:
+        logger.info("No classified fields discovered on selected form.")
+        return
+    logger.info("Identified %s candidate fields:", len(classifications))
     for classification in classifications:
         descriptor = classification.descriptor
-        logger.debug(
-            "Field #%s '%s' -> %s (required=%s, confidence=%.2f)",
+        logger.info(
+            "  #%s %s -> %s (required=%s, confidence=%.2f)",
             descriptor.order,
             descriptor.canonical_name(),
             classification.semantic.value,
             descriptor.required,
             classification.confidence,
         )
+
+
+def _preview_assignment_value(assignment: FieldAssignment) -> str:
+    value = assignment.plan.value
+    if assignment.semantic in SENSITIVE_LOGGING_SEMANTICS:
+        return "***"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    text = str(value)
+    if len(text) > 32:
+        return f"{text[:31]}…"
+    return text
+
+
+def _log_assignment_plans(
+    assignments: List[FieldAssignment], decisions: List[FieldDecision], logger: logging.Logger
+) -> None:
+    if not assignments:
+        logger.info("No fields will be auto-filled on this attempt.")
+    else:
+        logger.info("Preparing to fill %s fields:", len(assignments))
+        for assignment in assignments:
+            descriptor = assignment.descriptor
+            logger.info(
+                "  Fill %s (%s, required=%s) via %s -> %s",
+                descriptor.canonical_name(),
+                assignment.semantic.value,
+                assignment.required,
+                assignment.plan.strategy,
+                _preview_assignment_value(assignment),
+            )
+
+    skipped = [decision for decision in decisions if not decision.filled]
+    if skipped:
+        logger.info("Deliberately leaving %s fields untouched:", len(skipped))
+        for decision in skipped:
+            descriptor = decision.descriptor
+            logger.info(
+                "  Skip %s (%s) reason=%s",
+                descriptor.canonical_name(),
+                decision.semantic.value,
+                decision.reason or "unspecified",
+            )
 
 
 def _log_decisions(decisions: List[FieldDecision], logger: logging.Logger) -> None:
@@ -284,8 +352,10 @@ def _perform_attempt(
             final_url=page.url,
         )
 
+    _log_form_details(form_descriptor, logger)
     _log_field_classifications(classifications, logger)
     assignments, decisions = assign_registration_values(classifications, context)
+    _log_assignment_plans(assignments, decisions, logger)
     _log_decisions(decisions, logger)
 
     planned_names = {
